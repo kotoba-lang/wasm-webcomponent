@@ -47,6 +47,23 @@ KotobaWasmElement.define('my-kgraph-demo', {
 See `src/kotoba-wasm-element.js`'s header comment for the full `define()`
 option surface (`exportName`, `createImports`, `render`).
 
+Module using the `actor:host` ABI (`src/actor-host.js`'s port of
+`kototama.contract`'s HostCaps/RuntimeLimits, `kototama-lang/kototama`'s
+JVM tender's browser-side counterpart):
+
+```js
+import { KotobaWasmElement } from './src/kotoba-wasm-element.js';
+import { actorHostImports, hostCaps, inMemoryStore } from './src/actor-host.js';
+
+KotobaWasmElement.define('my-actor-host-demo', {
+  createImports(memoryBox) {
+    const store = inMemoryStore();
+    const caps = hostCaps({ grants: ['now', 'sha256-hex'] });
+    return { kotoba: actorHostImports(['now', 'sha256-hex'], caps, memoryBox, { store }) };
+  },
+});
+```
+
 ## Files
 
 - `src/kotoba-wasm-element.js` — `KotobaWasmElement`, the reusable custom
@@ -70,6 +87,20 @@ option surface (`exportName`, `createImports`, `render`).
   `kotoba wasm emit gcd.kotoba --package-lock <empty-deps-lock>` (96 bytes;
   see kotoba-lang/kotoba#284 for why an empty-deps lock is needed for a
   zero-dependency build).
+- `src/actor-host.js` — a browser-side port of `kotoba-lang/kototama`'s
+  `kototama.contract` (`actor:host` ABI: `HostCaps`/`RuntimeLimits`/
+  `validateImportSurface`, same fail-closed pre-flight + per-call grant
+  checks as `kototama.tender`, the JVM/Chicory counterpart). Implements
+  4 of the 8 `actor:host` imports (`now`/`sha256-hex`/`log-read`/
+  `log-append!`) — see its header comment for why `gen-keypair`/`sign`/
+  `verify`/`http-post` aren't implementable as synchronous Wasm host
+  imports without either JS Promise Integration or a hand-rolled
+  synchronous crypto implementation (not attempted here). Includes a
+  hand-rolled, zero-dependency, test-vector-verified synchronous SHA-256
+  (Web Crypto's `crypto.subtle.digest` is async, unusable inside a
+  synchronous host import).
+- `examples/actor-host/` — a hand-assembled (`wasm-tools`) module
+  importing `now`/`log_append`/`sha256_hex`, wired to `actor-host.js`.
 - `test/verify-*.mjs` — dependency-free Node smoke tests (same
   `WebAssembly` engine — V8 — a Chromium browser uses) for each example.
   They check the AOT-execution / host-import claims only; they do not
@@ -89,21 +120,29 @@ cd examples/hello && python3 -m http.server 8123
 node test/verify-hello.mjs
 node test/verify-kgraph.mjs
 node test/verify-gcd.mjs
+node test/verify-actor-host.mjs
 ```
 
 ## Scope (honest R0)
 
-- **Only `kgraph-*` has a browser host-import port.** `kse`/`auth`/`llm`/
-  `evm`/`btc`/`egress`/`chain` (referenced in the wider kotoba/kototama
-  design docs) have none. A module calling any other `(module "kotoba")`
-  import will fail to instantiate against this library today.
+- **`kgraph-*` and 4 of 8 `actor:host` imports have a browser host-import
+  port.** `kse`/`auth`/`llm`/`evm`/`btc`/`egress`/`chain` (referenced in
+  the wider kotoba/kototama design docs) have none, and neither do
+  `actor:host`'s `gen-keypair`/`sign`/`verify`/`http-post` (see
+  `src/actor-host.js`'s header comment — a synchronous Wasm host import
+  can't `await` the Web Crypto/`fetch` calls those would need). A module
+  calling any other `(module "kotoba")` import will fail to instantiate
+  against this library today.
 - **`kgraph.js`'s EDN reader/writer is intentionally minimal** — only the
   shapes the `kgraph-*` ABI carries (vectors, keyword-keyed maps, keywords,
   strings, integers, `?var` symbols), not general-purpose EDN.
-- **No capability/policy re-enforcement at load time.** `kotoba wasm emit
-  --policy`/`--package-lock` gates are build-time checks; nothing in this
-  library re-verifies them when a module loads. Don't treat a page built
-  on this library as a sandboxed multi-tenant host.
+- **`kgraph.js` has no capability/policy re-enforcement at load time**
+  (`kotoba wasm emit --policy`/`--package-lock` gates are build-time
+  checks only). `actor-host.js` is the exception: it DOES re-verify
+  `HostCaps`/`RuntimeLimits` at load time (pre-flight, before
+  `WebAssembly.instantiateStreaming` runs) and per host-function call —
+  but only for the 4 imports it implements. Don't treat a page built on
+  this library as a sandboxed multi-tenant host in general.
 - **Not every kotoba-lang repo has `.kotoba` source to point this at.**
   Most `kotoba-*`-named repos in the org (`lint-kotoba`, `kotoba-code`,
   `kotoba-procedure-clj`, ...) are regular `.cljc`/`.clj` Clojure libraries

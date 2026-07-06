@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kotoba-wasm-element: actor-host example</title>
+</head>
+<body>
+<h1>actor-host-demo.wasm (kototama.contract's actor:host ABI, partial)</h1>
+<p>
+  Imports <code>now</code>/<code>log_append</code>/<code>sha256_hex</code>
+  (module <code>"kotoba"</code>, same convention <code>kotoba.wasm-exec</code>
+  and <code>kototama.tender</code> use). Wired via <code>actor-host.js</code>
+  -- a browser-side port of <code>kotoba-lang/kototama</code>'s
+  <code>kototama.contract</code> (HostCaps/RuntimeLimits/
+  validate-import-surface, pre-flight AND per-call grant checks, same as
+  the JVM tender). Only 4 of the 8 <code>actor:host</code> imports are
+  implemented here -- <code>gen-keypair</code>/<code>sign</code>/
+  <code>verify</code>/<code>http-post</code> would need either an async
+  Web Crypto/fetch call inside a host import (not possible without JS
+  Promise Integration) or a hand-rolled synchronous crypto implementation
+  (not attempted here) -- see <code>src/actor-host.js</code>'s header
+  comment for the honest scope note.
+</p>
+<actor-host-wasm-demo src="./actor-host-demo.wasm"></actor-host-wasm-demo>
+<script type="module">
+  import { KotobaWasmElement } from '../../src/kotoba-wasm-element.js';
+  import { actorHostImports, hostCaps, inMemoryStore } from '../../src/actor-host.js';
+
+  KotobaWasmElement.define('actor-host-wasm-demo', {
+    createImports(memoryBox) {
+      const store = inMemoryStore();
+      memoryBox.store = store;
+      const caps = hostCaps({
+        grants: ['now', 'sha256-hex', 'log-append!'],
+        limits: { allowWriteImports: true },
+      });
+      return { kotoba: actorHostImports(['now', 'sha256-hex', 'log-append!'], caps, memoryBox, { store }) };
+    },
+    render(pre, { src, result, memoryBox }) {
+      const resultBytes = new Uint8Array(memoryBox.memory.buffer, 100, Number(result));
+      const resultText = new TextDecoder('utf-8').decode(resultBytes);
+      const logged = new TextDecoder('utf-8').decode(memoryBox.store.read());
+      pre.textContent =
+        `${src}\n` +
+        `  log_append! recorded: ${JSON.stringify(logged)}\n` +
+        `  sha256_hex("hello"):  ${resultText}`;
+    },
+  });
+</script>
+</body>
+</html>
