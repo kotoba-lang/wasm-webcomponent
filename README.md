@@ -47,6 +47,20 @@ KotobaWasmElement.define('my-kgraph-demo', {
 See `src/kotoba-wasm-element.js`'s header comment for the full `define()`
 option surface (`exportName`, `createImports`, `render`).
 
+Module using a runtime `(has-capability? :some/cap)` check (`has_capability`,
+a single import distinct from `kgraph-*`'s effectful host calls):
+
+```js
+import { KotobaWasmElement } from './src/kotoba-wasm-element.js';
+import { hasCapabilityHostImport } from './src/has-capability.js';
+
+KotobaWasmElement.define('my-cap-demo', {
+  createImports() {
+    return { kotoba: hasCapabilityHostImport(['notify/show']) };
+  },
+});
+```
+
 Module using the `actor:host` ABI (`src/actor-host.js`'s port of
 `kototama.contract`'s HostCaps/RuntimeLimits, `kototama-lang/kototama`'s
 JVM tender's browser-side counterpart):
@@ -87,6 +101,19 @@ KotobaWasmElement.define('my-actor-host-demo', {
   `kotoba wasm emit gcd.kotoba --package-lock <empty-deps-lock>` (96 bytes;
   see kotoba-lang/kotoba#284 for why an empty-deps lock is needed for a
   zero-dependency build).
+- `src/has-capability.js` — optional: a browser-side port of
+  `kotoba-lang/kotoba`'s `has_capability` host import
+  (`kotoba.wasm-exec/has-capability-fn`), for modules with a runtime
+  `(has-capability? :some/cap)` check (as opposed to the static
+  compile-time gate `kotoba wasm emit --policy` already applies). The
+  id-to-capability-name table is copied from the canonical
+  `kotoba-lang/kotoba-core-contracts` `capability_contract.edn` (this
+  library has no Clojure runtime to read that EDN file from directly).
+- `examples/cap/` — `demo_cap.kotoba` (a runtime `has-capability?` check)
+  instantiated twice with the same bytes: once granting `notify/show`
+  (`main()` → 7) and once denying everything (`main()` → 0) — proves the
+  check is real per-instantiation policy, not a stub that always answers
+  one way.
 - `src/actor-host.js` — a browser-side port of `kotoba-lang/kototama`'s
   `kototama.contract` (`actor:host` ABI: `HostCaps`/`RuntimeLimits`/
   `validateImportSurface`, same fail-closed pre-flight + per-call grant
@@ -120,19 +147,26 @@ cd examples/hello && python3 -m http.server 8123
 node test/verify-hello.mjs
 node test/verify-kgraph.mjs
 node test/verify-gcd.mjs
+node test/verify-cap.mjs
 node test/verify-actor-host.mjs
 ```
 
 ## Scope (honest R0)
 
-- **`kgraph-*` and 4 of 8 `actor:host` imports have a browser host-import
-  port.** `kse`/`auth`/`llm`/`evm`/`btc`/`egress`/`chain` (referenced in
-  the wider kotoba/kototama design docs) have none, and neither do
-  `actor:host`'s `gen-keypair`/`sign`/`verify`/`http-post` (see
-  `src/actor-host.js`'s header comment — a synchronous Wasm host import
-  can't `await` the Web Crypto/`fetch` calls those would need). A module
-  calling any other `(module "kotoba")` import will fail to instantiate
-  against this library today.
+- **`kgraph-*`, `has_capability`, and 4 of 8 `actor:host` imports have a
+  browser host-import port.** `kse`/`auth`/`llm`/`evm`/`btc`/`egress`/
+  `chain` (referenced in the wider kotoba/kototama design docs) have none,
+  and neither do `actor:host`'s `gen-keypair`/`sign`/`verify`/`http-post`
+  (see `src/actor-host.js`'s header comment — a synchronous Wasm host
+  import can't `await` the Web Crypto/`fetch` calls those would need). A
+  module calling any other `(module "kotoba")` import will fail to
+  instantiate against this library today.
+- **`has-capability.js` re-states a policy at load time, it doesn't
+  re-derive one.** The granted-capabilities list you pass to
+  `hasCapabilityHostImport` is trusted input from the page author, not
+  cryptographically verified against anything — it's the browser-side
+  equivalent of the JVM's `:kotoba.policy/capabilities` map, not a
+  replacement for `kotoba wasm emit --policy`'s compile-time gate.
 - **`kgraph.js`'s EDN reader/writer is intentionally minimal** — only the
   shapes the `kgraph-*` ABI carries (vectors, keyword-keyed maps, keywords,
   strings, integers, `?var` symbols), not general-purpose EDN.
