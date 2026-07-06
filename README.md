@@ -141,6 +141,37 @@ cd examples/hello && python3 -m http.server 8123
 # open http://localhost:8123/ in a browser
 ```
 
+Every `test/verify-*.mjs` in this repo confirms the underlying `WebAssembly`
+execution and host-import logic against Node's own engine (the same V8 a
+Chromium browser uses) — but none of them drive an actual DOM/
+`customElements` render in a real browser tab. That gap is a real,
+outstanding limitation of this test suite, not just an unverified claim:
+an agent working in a sandboxed automation environment tried to close it
+and hit tooling dead ends worth recording so the next attempt doesn't
+repeat them:
+- A local `python3 -m http.server` in a sandboxed shell was unreachable
+  from the browser-automation tool's actual Chrome process (separate
+  network namespaces) — `file://` and `data:` URLs were also blocked
+  outright by that tool.
+- jsdelivr's GitHub proxy (`cdn.jsdelivr.net/gh/...`) serves `.js` files
+  with the correct `application/javascript` type (fine for `import()`),
+  but serves `.html` as `text/plain; charset=utf-8` with `nosniff` — a
+  browser will not render it, only display it as text.
+- `htmlpreview.github.io` does serve proxied GitHub HTML as real
+  `text/html` and a page's own `<title>`/DOM genuinely renders through
+  it — but its own `htmlpreview.js` reinjects `<script>` tags in a way
+  that drops `type="module"`, so a page using `<script type="module">`
+  (this library's own convention) fails there with `Cannot use import
+  statement outside a module`. A page using dynamic `import()` from a
+  classic `<script>` avoids that specific error, but produced an
+  unexplained rendering artifact worth a fresh investigation rather than
+  more workarounds layered on unrelated third-party proxies.
+- None of the above says anything about a real, un-sandboxed browser
+  (a developer's own Chrome hitting a real `python3 -m http.server`)  —
+  only that this particular sandboxed session's tooling chain couldn't
+  reach one. Do this from an environment where the browser and the
+  static server actually share a network first.
+
 ## Run the tests
 
 ```bash
