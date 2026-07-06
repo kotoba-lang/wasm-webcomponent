@@ -72,8 +72,8 @@ import { actorHostImports, hostCaps, inMemoryStore } from './src/actor-host.js';
 KotobaWasmElement.define('my-actor-host-demo', {
   createImports(memoryBox) {
     const store = inMemoryStore();
-    const caps = hostCaps({ grants: ['now', 'sha256-hex'] });
-    return { kotoba: actorHostImports(['now', 'sha256-hex'], caps, memoryBox, { store }) };
+    const caps = hostCaps({ grants: ['clock-monotonic', 'sha256-hex'] });
+    return { kotoba: actorHostImports(['clock-monotonic', 'sha256-hex'], caps, memoryBox, { store }) };
   },
 });
 ```
@@ -118,8 +118,8 @@ KotobaWasmElement.define('my-actor-host-demo', {
   `kototama.contract` (`actor:host` ABI: `HostCaps`/`RuntimeLimits`/
   `validateImportSurface`, same fail-closed pre-flight + per-call grant
   checks as `kototama.tender`, the JVM/Chicory counterpart). Implements
-  7 of the 8 `actor:host` imports (`now`/`sha256-hex`/`gen-keypair`/`sign`/
-  `verify`/`log-read`/`log-append!`) — only `http-post` is missing (see its
+  7 of the 8 `actor:host` imports (`clock-monotonic`/`sha256-hex`/`gen-keypair`/`sign`/
+  `verify`/`log-read`/`log-write`) — only `http-post` is missing (see its
   header comment for why: `fetch` is real network I/O, not arithmetic, so
   unlike Ed25519 there's no synchronous-without-async version of it to
   write or vendor). Includes a hand-rolled, zero-dependency,
@@ -137,7 +137,7 @@ KotobaWasmElement.define('my-actor-host-demo', {
   and why vendored rather than CDN-imported (Node's default ESM loader
   refuses `https:` specifiers, which would break `node test/verify-*.mjs`).
 - `examples/actor-host/` — hand-assembled (`wasm-tools`) modules wired to
-  `actor-host.js`: `actor-host-demo.wasm` (`now`/`log_append`/`sha256_hex`)
+  `actor-host.js`: `actor-host-demo.wasm` (`clock_monotonic`/`log_write`/`sha256_hex`)
   and `crypto-demo.wasm` (`gen_keypair`/`sign`/`verify` — same fixture
   shape `kototama.tender`'s (JVM) `tender_test.clj` compiles via
   `wasm-tools`).
