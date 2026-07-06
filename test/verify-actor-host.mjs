@@ -121,5 +121,37 @@ check(preflightThrew, 'actorHostImports throws pre-flight when the surface is re
   check(logged === 'hello', `log_append! recorded the guest's 5-byte payload (got ${JSON.stringify(logged)})`);
 }
 
+// ── gen_keypair/sign/verify: real native-WebAssembly round trip through the
+// vendored ed25519, same fixture shape kototama.tender's (JVM) tender_test.clj
+// compiles via wasm-tools (module "kotoba", gen_keypair/sign/verify) ────────
+{
+  const bytes = await readFile(path.join(here, '..', 'examples', 'actor-host', 'crypto-demo.wasm'));
+  const memoryBox = {};
+  const caps = hostCaps({
+    grants: ['gen-keypair', 'sign', 'verify'],
+    limits: { allowSecretImports: true },
+  });
+  const importObject = {
+    kotoba: actorHostImports(['gen-keypair', 'sign', 'verify'], caps, memoryBox, {}),
+  };
+
+  const { instance } = await WebAssembly.instantiate(bytes, importObject);
+  memoryBox.memory = instance.exports.memory;
+
+  const ok = Number(instance.exports.main());
+  check(ok === 1, `guest gen_keypair -> sign -> verify round-trips true through real Chicory-equivalent WASM (got ${ok})`);
+}
+
+// ── gen_keypair/sign/verify without allowSecretImports: denied pre-flight,
+// same limit/secret-imports gate kototama.contract's default-runtime-limits
+// enforces (RuntimeLimits' :allow-secret-imports? false by default) ────────
+{
+  const denied = validateImportSurface(['gen-keypair'], hostCaps({ grants: ['gen-keypair'] }));
+  check(
+    denied.ok === false && denied.errors.some((e) => e.error === 'limit/secret-imports'),
+    `gen-keypair is denied without allowSecretImports even when granted (got ${JSON.stringify(denied.errors)})`
+  );
+}
+
 if (failed) process.exit(1);
 console.log('OK: actor-host.js round-trips through a real native-WebAssembly-hosted module');

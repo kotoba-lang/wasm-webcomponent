@@ -9,30 +9,46 @@
 // CDN-servable as raw ES modules (see README).
 //
 // ---------------------------------------------------------------------------
-// Scope (honest R0): only 4 of the 8 `actor:host` imports are implemented.
+// Scope (honest R0): 7 of the 8 `actor:host` imports are implemented.
 //
 // A WebAssembly host-import function called from a running guest MUST
 // return synchronously -- there is no `await` inside a Wasm call in a
-// standard browser today (JS Promise Integration, which would allow this,
-// is not yet universally shipped). `gen-keypair`/`sign`/`verify` (Ed25519)
-// and `http-post` all fundamentally need either the Web Crypto API
-// (`SubtleCrypto`, EVERY method async) or `fetch` (also async) -- neither
-// can be implemented as a synchronous host import without either (a) a
-// hand-rolled synchronous crypto implementation (a real, non-trivial
-// correctness undertaking for Ed25519 specifically -- not attempted here,
-// rather than risking a subtly wrong hand-rolled signature scheme), or
-// (b) JSPI once it's broadly available. NOT implemented here, on purpose,
-// not silently skipped: `gen_keypair`/`sign`/`verify`/`http_post` are
-// simply absent from `actorHostImports`'s returned import object, so a
-// guest declaring them fails to link with a clear Wasm "unknown import"
-// error, not a confusing runtime crash.
+// standard browser today (JS Promise Integration would allow this but isn't
+// broadly shipped across engines yet). `gen-keypair`/`sign`/`verify`
+// (Ed25519) don't actually need to go through the always-async Web Crypto
+// `SubtleCrypto` API to be correct, though -- Ed25519 signing is pure
+// arithmetic over bytes already in memory, not I/O, so a genuinely
+// synchronous implementation is possible without SubtleCrypto at all. Unlike
+// `sha256_hex` below, this isn't hand-rolled from scratch (a real,
+// non-trivial correctness undertaking for elliptic-curve arithmetic
+// specifically): `./vendor/curves/ed25519.js` vendors the actual,
+// unmodified, audited `@noble/curves` (see `./vendor/README.md` for
+// provenance and why vendored rather than CDN-imported).
 //
-// Implemented (all genuinely synchronous, zero dependencies):
+// `http-post` is the one import that's fundamentally unavailable: `fetch` is
+// real network I/O, not arithmetic, so there's no synchronous-without-async
+// version of it to write or vendor -- it needs either JSPI (Chrome 137+
+// only as of this writing, not yet Firefox/Safari) or a
+// SharedArrayBuffer+Atomics.wait blocking bridge (needs COOP/COEP response
+// headers, which this library's "zero-build-step, CDN-servable as raw
+// static files" deployment model doesn't assume). NOT implemented here, on
+// purpose, not silently skipped: `http_post` is simply absent from
+// `actorHostImports`'s returned import object, so a guest declaring it
+// fails to link with a clear Wasm "unknown import" error, not a confusing
+// runtime crash.
+//
+// Implemented (all genuinely synchronous):
 //   - `now`           -- `Date.now()`
-//   - `sha256_hex`    -- hand-rolled synchronous SHA-256 (below), verified
-//                        against known digests in test/verify-actor-host.mjs
+//   - `sha256_hex`    -- hand-rolled synchronous SHA-256, zero dependencies,
+//                        verified against known digests in
+//                        test/verify-actor-host.mjs
+//   - `gen_keypair` / `sign` / `verify` -- vendored `@noble/curves` ed25519
+//                        (see above), verified via a real Chicory-equivalent
+//                        WASM round trip in test/verify-actor-host.mjs
 //   - `log_read` / `log_append` -- an injectable synchronous byte store
 //                        (same `store` parameter shape kgraph.js uses)
+
+import { ed25519 } from './vendor/curves/ed25519.js';
 
 export const ACTOR_HOST_NAMESPACE = 'actor:host';
 export const ACTOR_HOST_VERSION = 0;
@@ -247,6 +263,44 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       ensureGranted('sha256-hex');
       const hex = sha256Hex(readBytes(ptr, len));
       return writeBytes(outPtr, outCap, new TextEncoder().encode(hex));
+    };
+  }
+
+  // `(out-ptr out-cap) -> bytes-written|-1`. Writes a fresh 32-byte Ed25519
+  // seed followed by its 32-byte derived public key (64 bytes total) --
+  // same wire shape kototama.tender's (JVM) `gen-keypair-host-fn` uses.
+  if (available.has('gen-keypair')) {
+    fns.gen_keypair = (outPtr, outCap) => {
+      ensureGranted('gen-keypair');
+      const seed = ed25519.utils.randomPrivateKey();
+      const pub = ed25519.getPublicKey(seed);
+      const out = new Uint8Array(64);
+      out.set(seed, 0);
+      out.set(pub, 32);
+      return writeBytes(outPtr, outCap, out);
+    };
+  }
+
+  // `(seed-ptr msg-ptr msg-len out-ptr out-cap) -> bytes-written|-1`. Signs
+  // MSG with the raw 32-byte seed at SEED-PTR, writes the 64-byte signature.
+  if (available.has('sign')) {
+    fns.sign = (seedPtr, msgPtr, msgLen, outPtr, outCap) => {
+      ensureGranted('sign');
+      const seed = readBytes(seedPtr, 32);
+      const msg = readBytes(msgPtr, msgLen);
+      const sig = ed25519.sign(msg, seed);
+      return writeBytes(outPtr, outCap, sig);
+    };
+  }
+
+  // `(pub-ptr pub-len msg-ptr msg-len sig-ptr sig-len) -> 1|0`.
+  if (available.has('verify')) {
+    fns.verify = (pubPtr, pubLen, msgPtr, msgLen, sigPtr, sigLen) => {
+      ensureGranted('verify');
+      const pub = readBytes(pubPtr, pubLen);
+      const msg = readBytes(msgPtr, msgLen);
+      const sig = readBytes(sigPtr, sigLen);
+      return ed25519.verify(sig, msg, pub) ? 1 : 0;
     };
   }
 

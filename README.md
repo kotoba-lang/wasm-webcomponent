@@ -118,16 +118,29 @@ KotobaWasmElement.define('my-actor-host-demo', {
   `kototama.contract` (`actor:host` ABI: `HostCaps`/`RuntimeLimits`/
   `validateImportSurface`, same fail-closed pre-flight + per-call grant
   checks as `kototama.tender`, the JVM/Chicory counterpart). Implements
-  4 of the 8 `actor:host` imports (`now`/`sha256-hex`/`log-read`/
-  `log-append!`) — see its header comment for why `gen-keypair`/`sign`/
-  `verify`/`http-post` aren't implementable as synchronous Wasm host
-  imports without either JS Promise Integration or a hand-rolled
-  synchronous crypto implementation (not attempted here). Includes a
-  hand-rolled, zero-dependency, test-vector-verified synchronous SHA-256
-  (Web Crypto's `crypto.subtle.digest` is async, unusable inside a
-  synchronous host import).
-- `examples/actor-host/` — a hand-assembled (`wasm-tools`) module
-  importing `now`/`log_append`/`sha256_hex`, wired to `actor-host.js`.
+  7 of the 8 `actor:host` imports (`now`/`sha256-hex`/`gen-keypair`/`sign`/
+  `verify`/`log-read`/`log-append!`) — only `http-post` is missing (see its
+  header comment for why: `fetch` is real network I/O, not arithmetic, so
+  unlike Ed25519 there's no synchronous-without-async version of it to
+  write or vendor). Includes a hand-rolled, zero-dependency,
+  test-vector-verified synchronous SHA-256 (Web Crypto's
+  `crypto.subtle.digest` is async, unusable inside a synchronous host
+  import) and vendors the real `@noble/curves` ed25519 for `gen-keypair`/
+  `sign`/`verify` (see `src/vendor/README.md` — Ed25519 signing is pure
+  arithmetic, not I/O, so it doesn't need `SubtleCrypto`'s async API, but
+  it's real elliptic-curve math not worth hand-rolling from scratch the
+  way SHA-256 is).
+- `src/vendor/` — the actual, unmodified `@noble/curves`/`@noble/hashes`
+  source files `actor-host.js`'s ed25519 imports need, copied file-for-file
+  (not hand-transcribed) with only bare-specifier import paths patched to
+  relative — see `src/vendor/README.md` for the exact file list, versions,
+  and why vendored rather than CDN-imported (Node's default ESM loader
+  refuses `https:` specifiers, which would break `node test/verify-*.mjs`).
+- `examples/actor-host/` — hand-assembled (`wasm-tools`) modules wired to
+  `actor-host.js`: `actor-host-demo.wasm` (`now`/`log_append`/`sha256_hex`)
+  and `crypto-demo.wasm` (`gen_keypair`/`sign`/`verify` — same fixture
+  shape `kototama.tender`'s (JVM) `tender_test.clj` compiles via
+  `wasm-tools`).
 - `test/verify-*.mjs` — dependency-free Node smoke tests (same
   `WebAssembly` engine — V8 — a Chromium browser uses) for each example.
   They check the AOT-execution / host-import claims only; they do not
@@ -184,14 +197,17 @@ node test/verify-actor-host.mjs
 
 ## Scope (honest R0)
 
-- **`kgraph-*`, `has_capability`, and 4 of 8 `actor:host` imports have a
+- **`kgraph-*`, `has_capability`, and 7 of 8 `actor:host` imports have a
   browser host-import port.** `kse`/`auth`/`llm`/`evm`/`btc`/`egress`/
   `chain` (referenced in the wider kotoba/kototama design docs) have none,
-  and neither do `actor:host`'s `gen-keypair`/`sign`/`verify`/`http-post`
-  (see `src/actor-host.js`'s header comment — a synchronous Wasm host
-  import can't `await` the Web Crypto/`fetch` calls those would need). A
-  module calling any other `(module "kotoba")` import will fail to
-  instantiate against this library today.
+  and neither does `actor:host`'s `http-post` (see `src/actor-host.js`'s
+  header comment — `fetch` is real network I/O, so a synchronous Wasm host
+  import can't perform it without either JS Promise Integration, which
+  isn't broadly shipped across engines yet, or a SharedArrayBuffer+
+  `Atomics.wait` bridge, which needs COOP/COEP response headers this
+  library's plain-static-file deployment model doesn't assume). A module
+  calling any other `(module "kotoba")` import will fail to instantiate
+  against this library today.
 - **`has-capability.js` re-states a policy at load time, it doesn't
   re-derive one.** The granted-capabilities list you pass to
   `hasCapabilityHostImport` is trusted input from the page author, not
