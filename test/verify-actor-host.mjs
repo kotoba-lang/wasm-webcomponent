@@ -2,7 +2,7 @@
 // (1) the hand-rolled synchronous SHA-256 against known digests, (2)
 // validateImportSurface's grant/limit denials as pure data, (3) a real
 // native-WebAssembly round trip through examples/actor-host/actor-host-demo.wasm
-// (now/log_append/sha256_hex, module "kotoba" -- same fixture shape
+// (clock_monotonic/log_write/sha256_hex, module "kotoba" -- same fixture shape
 // kotoba-lang/kototama's tender_test.clj compiles via wasm-tools, here
 // compiled once and checked in). Run: `node test/verify-actor-host.mjs`
 import { readFile } from 'node:fs/promises';
@@ -63,13 +63,13 @@ check(
   `sign is denied without allowSecretImports even when granted (got ${JSON.stringify(secretDenied.errors)})`
 );
 
-const granted = validateImportSurface(['now', 'sha256-hex'], hostCaps({ grants: ['now', 'sha256-hex'] }));
-check(granted.ok === true, `now+sha256-hex granted and requested both pass validation (got ${JSON.stringify(granted.errors)})`);
+const granted = validateImportSurface(['clock-monotonic', 'sha256-hex'], hostCaps({ grants: ['clock-monotonic', 'sha256-hex'] }));
+check(granted.ok === true, `clock-monotonic+sha256-hex granted and requested both pass validation (got ${JSON.stringify(granted.errors)})`);
 
 // ── actorHostImports: pre-flight rejection (no memory box even touched) ────
 let preflightThrew = false;
 try {
-  actorHostImports(['log-append!'], hostCaps({ grants: [] }), {});
+  actorHostImports(['log-write'], hostCaps({ grants: [] }), {});
 } catch (e) {
   preflightThrew = true;
 }
@@ -80,16 +80,16 @@ check(preflightThrew, 'actorHostImports throws pre-flight when the surface is re
   const store = inMemoryStore();
   const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
   const fns = actorHostImports(
-    ['log-append!'],
-    hostCaps({ grants: ['log-append!'], limits: { allowWriteImports: true, maxLogAppendBytes: 4 } }),
+    ['log-write'],
+    hostCaps({ grants: ['log-write'], limits: { allowWriteImports: true, maxLogWriteBytes: 4 } }),
     memoryBox,
     { store }
   );
   new Uint8Array(memoryBox.memory.buffer, 0, 4).set([1, 2, 3, 4]);
-  const first = fns.log_append(0, 4);
-  const second = fns.log_append(0, 4); // now 8 bytes total, over the 4-byte cap
-  check(first === 0, `first 4-byte append succeeds (got ${first})`);
-  check(second === -1, `second append exceeding maxLogAppendBytes=4 returns -1, not a throw (got ${second})`);
+  const first = fns.log_write(0, 4);
+  const second = fns.log_write(0, 4); // now 8 bytes total, over the 4-byte cap
+  check(first === 0, `first 4-byte write succeeds (got ${first})`);
+  check(second === -1, `second write exceeding maxLogWriteBytes=4 returns -1, not a throw (got ${second})`);
 }
 
 // ── real native-WebAssembly round trip (module "kotoba", same convention
@@ -99,10 +99,10 @@ check(preflightThrew, 'actorHostImports throws pre-flight when the surface is re
   const store = inMemoryStore();
   const memoryBox = {};
   const caps = hostCaps({
-    grants: ['now', 'sha256-hex', 'log-append!'],
+    grants: ['clock-monotonic', 'sha256-hex', 'log-write'],
     limits: { allowWriteImports: true },
   });
-  const importObject = { kotoba: actorHostImports(['now', 'sha256-hex', 'log-append!'], caps, memoryBox, { store }) };
+  const importObject = { kotoba: actorHostImports(['clock-monotonic', 'sha256-hex', 'log-write'], caps, memoryBox, { store }) };
 
   const { instance } = await WebAssembly.instantiate(bytes, importObject);
   memoryBox.memory = instance.exports.memory;
@@ -118,7 +118,7 @@ check(preflightThrew, 'actorHostImports throws pre-flight when the surface is re
   );
 
   const logged = new TextDecoder('utf-8').decode(store.read());
-  check(logged === 'hello', `log_append! recorded the guest's 5-byte payload (got ${JSON.stringify(logged)})`);
+  check(logged === 'hello', `log_write recorded the guest's 5-byte payload (got ${JSON.stringify(logged)})`);
 }
 
 // ── gen_keypair/sign/verify: real native-WebAssembly round trip through the

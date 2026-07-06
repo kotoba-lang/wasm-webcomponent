@@ -7,7 +7,7 @@
 <body>
 <h1>actor-host-demo.wasm (kototama.contract's actor:host ABI, partial)</h1>
 <p>
-  Imports <code>now</code>/<code>log_append</code>/<code>sha256_hex</code>
+  Imports <code>clock_monotonic</code>/<code>log_write</code>/<code>sha256_hex</code>
   (module <code>"kotoba"</code>, same convention <code>kotoba.wasm-exec</code>
   and <code>kototama.tender</code> use). Wired via <code>actor-host.js</code>
   -- a browser-side port of <code>kotoba-lang/kototama</code>'s
@@ -29,10 +29,10 @@
       const store = inMemoryStore();
       memoryBox.store = store;
       const caps = hostCaps({
-        grants: ['now', 'sha256-hex', 'log-append!'],
+        grants: ['clock-monotonic', 'sha256-hex', 'log-write'],
         limits: { allowWriteImports: true },
       });
-      return { kotoba: actorHostImports(['now', 'sha256-hex', 'log-append!'], caps, memoryBox, { store }) };
+      return { kotoba: actorHostImports(['clock-monotonic', 'sha256-hex', 'log-write'], caps, memoryBox, { store }) };
     },
     render(pre, { src, result, memoryBox }) {
       const resultBytes = new Uint8Array(memoryBox.memory.buffer, 100, Number(result));
@@ -40,7 +40,7 @@
       const logged = new TextDecoder('utf-8').decode(memoryBox.store.read());
       pre.textContent =
         `${src}\n` +
-        `  log_append! recorded: ${JSON.stringify(logged)}\n` +
+        `  log_write recorded: ${JSON.stringify(logged)}\n` +
         `  sha256_hex("hello"):  ${resultText}`;
     },
   });

@@ -38,15 +38,24 @@
 // runtime crash.
 //
 // Implemented (all genuinely synchronous):
-//   - `now`           -- `Date.now()`
+//   - `clock_monotonic` -- `Date.now()`
 //   - `sha256_hex`    -- hand-rolled synchronous SHA-256, zero dependencies,
 //                        verified against known digests in
 //                        test/verify-actor-host.mjs
 //   - `gen_keypair` / `sign` / `verify` -- vendored `@noble/curves` ed25519
 //                        (see above), verified via a real Chicory-equivalent
 //                        WASM round trip in test/verify-actor-host.mjs
-//   - `log_read` / `log_append` -- an injectable synchronous byte store
+//   - `log_read` / `log_write` -- an injectable synchronous byte store
 //                        (same `store` parameter shape kgraph.js uses)
+//
+// Field/id names (`clock-monotonic`/`log-write`, not `now`/`log-append!`)
+// match `kotoba-lang/kototama`'s `kototama.contract` and
+// `kotoba-core-contracts`' capability_contract.edn 1:1 -- a concurrent
+// session independently registered `clock-monotonic`/`log-write` in that
+// shared compiler table for aiueos's kernel-capability vocabulary with
+// identical wire signatures, so kototama's side (and this browser port)
+// were renamed to reuse those names instead of registering the same
+// operation twice under different names.
 
 import { ed25519 } from './vendor/curves/ed25519.js';
 
@@ -66,8 +75,8 @@ export const IMPORT_SURFACE = [
   { id: 'sha256-hex', category: 'content-addressing', effects: new Set(['crypto']) },
   { id: 'http-post', category: 'network', effects: new Set(['network']) },
   { id: 'log-read', category: 'storage', effects: new Set(['storage']) },
-  { id: 'log-append!', category: 'storage', effects: new Set(['storage', 'write']) },
-  { id: 'now', category: 'clock', effects: new Set(['clock']) },
+  { id: 'log-write', category: 'storage', effects: new Set(['storage', 'write']) },
+  { id: 'clock-monotonic', category: 'clock', effects: new Set(['clock']) },
 ];
 
 const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
@@ -76,7 +85,7 @@ export const DEFAULT_RUNTIME_LIMITS = {
   maxImports: IMPORT_SURFACE.length,
   maxHttpPosts: 0,
   maxLogReadBytes: 1048576,
-  maxLogAppendBytes: 65536,
+  maxLogWriteBytes: 65536,
   allowSecretImports: false,
   allowWriteImports: false,
 };
@@ -224,7 +233,7 @@ export function inMemoryStore() {
 //      try/catch renders the error -- no separate wiring needed.
 //   2. PER-CALL: each host function re-checks its own grant (defense in
 //      depth) via `ensureGranted`.
-// RuntimeLimits exhaustion (`maxLogReadBytes`/`maxLogAppendBytes`) is an
+// RuntimeLimits exhaustion (`maxLogReadBytes`/`maxLogWriteBytes`) is an
 // in-band `-1`, same convention `writeBytes`'s overflow case uses -- NOT a
 // thrown error -- so a well-behaved guest can see it and back off, exactly
 // like `kototama.tender`'s distinction between a hard-thrown grant
@@ -237,7 +246,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   }
 
   const store = opts.store || inMemoryStore();
-  const state = { logReadBytes: 0, logAppendBytes: 0 };
+  const state = { logReadBytes: 0, logWriteBytes: 0 };
   const available = new Set(validation.requested);
 
   const readBytes = (ptr, len) => new Uint8Array(memoryBox.memory.buffer, ptr, len).slice();
@@ -254,8 +263,8 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
 
   const fns = {};
 
-  if (available.has('now')) {
-    fns.now = () => BigInt(Date.now());
+  if (available.has('clock-monotonic')) {
+    fns.clock_monotonic = () => BigInt(Date.now());
   }
 
   if (available.has('sha256-hex')) {
@@ -314,12 +323,12 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
     };
   }
 
-  if (available.has('log-append!')) {
-    fns.log_append = (ptr, len) => {
-      ensureGranted('log-append!');
+  if (available.has('log-write')) {
+    fns.log_write = (ptr, len) => {
+      ensureGranted('log-write');
       const bytes = readBytes(ptr, len);
-      if (state.logAppendBytes + bytes.length > c.limits.maxLogAppendBytes) return -1;
-      state.logAppendBytes += bytes.length;
+      if (state.logWriteBytes + bytes.length > c.limits.maxLogWriteBytes) return -1;
+      state.logWriteBytes += bytes.length;
       store.append(bytes);
       return 0;
     };
