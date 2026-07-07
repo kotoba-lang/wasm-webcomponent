@@ -9,7 +9,10 @@
 // CDN-servable as raw ES modules (see README).
 //
 // ---------------------------------------------------------------------------
-// Scope (honest R0): 7 of the 8 `actor:host` imports are implemented.
+// Scope (honest R0): 7 of the 9 `actor:host` imports are unconditionally
+// implemented; `llm-infer` is a conditional 8th, wired only when a Node
+// caller injects a synchronous backend (see `llm-infer` below); `http-post`
+// remains the one that's fundamentally unavailable in a browser tab.
 //
 // A WebAssembly host-import function called from a running guest MUST
 // return synchronously -- there is no `await` inside a Wasm call in a
@@ -63,10 +66,10 @@ export const ACTOR_HOST_NAMESPACE = 'actor:host';
 export const ACTOR_HOST_VERSION = 0;
 
 // ---------------------------------------------------------------------------
-// kototama.contract's import-surface, ported 1:1 (same 8 ids, same effect
-// tags -- kept complete even though only 4 have a browser implementation
+// kototama.contract's import-surface, ported 1:1 (same ids, same effect
+// tags -- kept complete even though only some have a browser implementation
 // below, so `validateImportSurface` still recognizes and correctly denies
-// the other 4 by name rather than treating them as unknown).
+// the rest by name rather than treating them as unknown).
 
 export const IMPORT_SURFACE = [
   { id: 'gen-keypair', category: 'identity', effects: new Set(['crypto', 'secret']) },
@@ -77,6 +80,18 @@ export const IMPORT_SURFACE = [
   { id: 'log-read', category: 'storage', effects: new Set(['storage']) },
   { id: 'log-write', category: 'storage', effects: new Set(['storage', 'write']) },
   { id: 'clock-monotonic', category: 'clock', effects: new Set(['clock']) },
+  // `llm-infer` (`llm/infer`, capability id 225 in kotoba-core-contracts'
+  // capability_contract.edn; kototama.tender's Anthropic Messages API
+  // call). Unlike `http-post`, this ISN'T fundamentally un-implementable
+  // here -- it's only a real browser tab that can't do synchronous network
+  // I/O. A Node host (this repo's own test/*.mjs scripts, not a browser)
+  // has no such constraint and can inject a genuinely synchronous
+  // implementation via `opts.llmInfer` (e.g. a blocking child_process
+  // call) below, so this is listed unconditionally and wired whenever a
+  // caller supplies one -- same "declared but only linked when a real
+  // implementation exists" honesty `http-post`'s comment above documents,
+  // just environment-dependent instead of universally absent.
+  { id: 'llm-infer', category: 'llm', effects: new Set(['network']) },
 ];
 
 const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
@@ -84,6 +99,7 @@ const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
 export const DEFAULT_RUNTIME_LIMITS = {
   maxImports: IMPORT_SURFACE.length,
   maxHttpPosts: 0,
+  maxLlmInfers: 0,
   maxLogReadBytes: 1048576,
   maxLogWriteBytes: 65536,
   allowSecretImports: false,
@@ -123,6 +139,10 @@ export function validateImportSurface(requestedIds, caps) {
   const httpPosts = known.filter((id) => id === 'http-post').length;
   if (httpPosts > c.limits.maxHttpPosts) {
     errors.push({ error: 'limit/max-http-posts', limit: c.limits.maxHttpPosts, actual: httpPosts });
+  }
+  const llmInfers = known.filter((id) => id === 'llm-infer').length;
+  if (llmInfers > c.limits.maxLlmInfers) {
+    errors.push({ error: 'limit/max-llm-infers', limit: c.limits.maxLlmInfers, actual: llmInfers });
   }
   const secretImports = known.filter((id) => IMPORT_BY_ID.get(id).effects.has('secret'));
   if (!c.limits.allowSecretImports && secretImports.length) {
@@ -331,6 +351,27 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       state.logWriteBytes += bytes.length;
       store.append(bytes);
       return 0;
+    };
+  }
+
+  // `(prompt-ptr prompt-len out-ptr out-cap) -> bytes-written|-1`. Only
+  // wired when a caller supplies `opts.llmInfer` (a synchronous
+  // `(promptString) => string|null` function) -- e.g. this repo's own
+  // Node-hosted verify scripts backing it with a blocking child_process
+  // call to `curl`. Never call `opts.llmInfer` from actual browser code: a
+  // synchronous XHR-style blocking call is deprecated/discouraged
+  // platform-wide there, unlike a Node `child_process` call, which has no
+  // such constraint. `text === null` (no API key configured on the host,
+  // the call failed, or an empty/malformed reply) fails closed as -1, same
+  // as `kototama.tender`'s `llm-infer-host-fn` never distinguishing "no
+  // credential" from "call failed" in-band.
+  if (available.has('llm-infer') && typeof opts.llmInfer === 'function') {
+    fns.llm_infer = (promptPtr, promptLen, outPtr, outCap) => {
+      ensureGranted('llm-infer');
+      const prompt = new TextDecoder().decode(readBytes(promptPtr, promptLen));
+      const text = opts.llmInfer(prompt);
+      if (text == null) return -1;
+      return writeBytes(outPtr, outCap, new TextEncoder().encode(text));
     };
   }
 

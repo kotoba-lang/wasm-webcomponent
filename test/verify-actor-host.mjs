@@ -153,5 +153,59 @@ check(preflightThrew, 'actorHostImports throws pre-flight when the surface is re
   );
 }
 
+// ── llm-infer: denied by default (maxLlmInfers 0, same convention
+// max-http-posts uses), same limit/max-llm-infers shape kototama.tender's
+// (JVM) :limit/max-llm-infers denial uses ──────────────────────────────────
+{
+  const denied = validateImportSurface(['llm-infer'], hostCaps({ grants: ['llm-infer'] }));
+  check(
+    denied.ok === false && denied.errors.some((e) => e.error === 'limit/max-llm-infers'),
+    `llm-infer is denied without raising maxLlmInfers even when granted (got ${JSON.stringify(denied.errors)})`
+  );
+  const granted = validateImportSurface(['llm-infer'], hostCaps({ grants: ['llm-infer'], limits: { maxLlmInfers: 1 } }));
+  check(granted.ok === true, `llm-infer granted + maxLlmInfers raised passes validation (got ${JSON.stringify(granted.errors)})`);
+}
+
+// ── llm-infer: without opts.llmInfer, fns.llm_infer is never wired even
+// when granted -- same "declared but not linked" honesty http-post's
+// permanent absence uses, just conditional on the Node caller's choice
+// instead of universal ──────────────────────────────────────────────────
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const fns = actorHostImports(
+    ['llm-infer'],
+    hostCaps({ grants: ['llm-infer'], limits: { maxLlmInfers: 1 } }),
+    memoryBox
+    // no opts.llmInfer
+  );
+  check(fns.llm_infer === undefined, 'fns.llm_infer is absent when no opts.llmInfer backend is supplied');
+}
+
+// ── llm-infer: with a fake synchronous opts.llmInfer, a real prompt/reply
+// round-trips through guest memory, and a null reply (no key configured /
+// call failed) fails closed as -1, matching kototama.tender's
+// llm-infer-host-fn never distinguishing the two in-band ──────────────────
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  let lastPrompt = null;
+  const fns = actorHostImports(
+    ['llm-infer'],
+    hostCaps({ grants: ['llm-infer'], limits: { maxLlmInfers: 2 } }),
+    memoryBox,
+    { llmInfer: (prompt) => { lastPrompt = prompt; return prompt === 'fail' ? null : `echo:${prompt}`; } }
+  );
+  const promptBytes = new TextEncoder().encode('hi');
+  new Uint8Array(memoryBox.memory.buffer, 0, promptBytes.length).set(promptBytes);
+  const written = fns.llm_infer(0, promptBytes.length, 100, 64);
+  const reply = new TextDecoder('utf-8').decode(new Uint8Array(memoryBox.memory.buffer, 100, written));
+  check(lastPrompt === 'hi', `opts.llmInfer receives the guest's decoded prompt (got ${JSON.stringify(lastPrompt)})`);
+  check(reply === 'echo:hi', `opts.llmInfer's reply is written back into guest memory (got ${JSON.stringify(reply)})`);
+
+  const failBytes = new TextEncoder().encode('fail');
+  new Uint8Array(memoryBox.memory.buffer, 0, failBytes.length).set(failBytes);
+  const failResult = fns.llm_infer(0, failBytes.length, 100, 64);
+  check(failResult === -1, `a null opts.llmInfer reply fails closed as -1 (got ${failResult})`);
+}
+
 if (failed) process.exit(1);
 console.log('OK: actor-host.js round-trips through a real native-WebAssembly-hosted module');
