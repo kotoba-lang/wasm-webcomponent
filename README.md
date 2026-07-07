@@ -141,11 +141,47 @@ KotobaWasmElement.define('my-actor-host-demo', {
   and `crypto-demo.wasm` (`gen_keypair`/`sign`/`verify` — same fixture
   shape `kototama.tender`'s (JVM) `tender_test.clj` compiles via
   `wasm-tools`).
+- `src-cljs/kotoba/kami_engine_host.cljs` / `src/kami-engine-host.js` — a
+  port of `kotoba-lang/kami-script-runtime-rs` (the Rust/wasmtime WASM host
+  for `kotoba-lang/engine`-compiled `.clj` game scripts), **authored in
+  ClojureScript and compiled once via `shadow-cljs.edn`'s `:kami-engine-host`
+  build (`:target :esm`) to `src/kami-engine-host.js`** — see
+  ADR-2607078000 for why this module (unlike this repo's other, hand-JS
+  modules below) takes a build step: one compiled ES module runs
+  identically in a browser `<script type="module">` and in Node, instead
+  of separate per-platform hand-ports. Run `npm install && npm run
+  compile:kami-engine-host` to regenerate `src/kami-engine-host.js` from
+  the `.cljs` source (the compiled output is checked in, so consumers don't
+  need shadow-cljs unless they're changing the source). Wires all 14
+  `kami:engine/*` host-imports (`bind_scene`/`bind_input`/`bind_random`/
+  `bind_time`, across 4 WASM import modules: `kami:engine/scene@1.0.0`,
+  `/input`, `/random`, `/time`) and drives the guest's `init`/`<name>-tick`
+  lifecycle against a minimal in-memory ECS store — same semantics as the
+  Rust `KamiHost`, ported 1:1 (entity spawn/despawn/position/velocity, tag
+  queries, nearest/move-toward, xorshift64 random, fixed-step Euler
+  integration, export-section `-tick`-suffix ordering). Exports
+  `createKamiEngineHost(seed)` (a factory returning a plain JS object with
+  `imports`/`setAxis`/`attach`/`callInit`/`tick`/`entityCount`/
+  `taggedCount`/`debugDump` methods — not a JS `class`) and
+  `orderedTickExports(wasmBytes)`. Unlike this library's other modules
+  (single `(module "kotoba")` ABI), this one targets `kami-script-runtime-
+  rs`'s existing 4-namespace import shape directly, since the goal is
+  running the exact same compiled `game.wasm` a Rust host runs, not a new
+  ABI.
+- `examples/kami-engine-host/` — `isekai-network-01-netsurvivors.wasm`
+  (the same fixture `kami-script-runtime-rs/tests/fixtures/` ships) driven
+  for 300 ticks via `requestAnimationFrame` (real-browser confirmation
+  outstanding — see ADR-2607078000's Consequences).
 - `test/verify-*.mjs` — dependency-free Node smoke tests (same
   `WebAssembly` engine — V8 — a Chromium browser uses) for each example.
   They check the AOT-execution / host-import claims only; they do not
   exercise `KotobaWasmElement`'s DOM/customElements path (no DOM in plain
   Node) — that needs a real browser, see `examples/*/index.html`.
+  `verify-kami-engine-host.mjs` specifically is the parity proof for
+  retiring `kami-script-runtime-rs`'s Rust runtime role: it drives the same
+  fixture for the same 300 ticks and asserts the exact same entity counts
+  (`entities=16 shiro-pico=1 ghost=14 beat-spark=1`) that crate's own README
+  documents from a real `cargo run`/wasmtime execution.
 
 ## Run an example
 
@@ -193,6 +229,7 @@ node test/verify-kgraph.mjs
 node test/verify-gcd.mjs
 node test/verify-cap.mjs
 node test/verify-actor-host.mjs
+node test/verify-kami-engine-host.mjs
 ```
 
 ## Scope (honest R0)

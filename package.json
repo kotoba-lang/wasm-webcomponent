@@ -1,0 +1,12 @@
+{
+  "name": "wasm-webcomponent",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "shadow-cljs": "^2.28.20"
+  },
+  "scripts": {
+    "compile:kami-engine-host": "shadow-cljs compile kami-engine-host",
+    "release:kami-engine-host": "shadow-cljs release kami-engine-host"
+  }
+}
