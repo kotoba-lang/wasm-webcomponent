@@ -1,0 +1,15 @@
+;; ClojureScript build for kami-engine-host (ADR-2607072715): a
+;; kotoba-lang/kami-script-runtime-rs port authored once in ClojureScript and
+;; compiled to a single ES module (`src/kami-engine-host.js`) that runs
+;; identically in a browser `<script type="module">` and in Node — no
+;; per-platform hand-written JS ports.
+{:source-paths ["src-cljs"]
+ :dependencies []
+ :builds
+ {:kami-engine-host
+  {:target :esm
+   :output-dir "src"
+   :modules {:kami-engine-host
+             {:exports {createKamiEngineHost kotoba.kami-engine-host/create-kami-engine-host
+                        orderedTickExports kotoba.kami-engine-host/ordered-tick-exports}}}
+   :release {:compiler-options {:optimizations :advanced}}}}}
