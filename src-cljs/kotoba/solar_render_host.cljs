@@ -1,7 +1,8 @@
 (ns kotoba.solar-render-host
-  "Track B Phase 1 (ADR-2607078000): the browser host for
-  `gpu-set-position`/`gpu-draw-frame` — renders `kami-solar-helix-scene`'s
-  9 bodies (Sun + 8 planets) as spheres.
+  "Track B Phase 1 + follow-up (ADR-2607078000): the browser host for
+  `gpu-set-position`/`gpu-draw-frame`/`now-days`/`galactic-frame?` —
+  renders `kami-solar-helix-scene`'s 9 bodies (Sun + 8 planets) as
+  spheres, animated, with a heliocentric/galactic (\"helix\") view toggle.
 
   Architecture (deliberate, not a shortcut): the guest (`.kotoba`, compiled
   from `demo_solar_helix.kotoba`) computes each body's position every frame
@@ -16,10 +17,36 @@
   GPU-instanced rendering, since 9 is small enough that the simplicity is
   worth more than the throughput.
 
+  Animation is driven the same way, one step further: `.kotoba` has no
+  clock and no loop beyond recursion, so it can't animate itself. Instead
+  `main` stays a 0-arity, single-frame function — the PAGE calls
+  `instance.exports.main()` again every `requestAnimationFrame` tick (see
+  `examples/solar-helix/index.html`), and each call the guest asks this
+  host, via the `now-days` host-import, \"what time is it now\" instead of
+  using a fixed constant. `now-days` returns an already-WRAPPED simulated
+  day count (plain JS `%`, computed host-side) so the guest never needs a
+  modulo/floor op it doesn't have, and the Sun's forward galactic drift
+  (added when `galactic-frame?` is on) stays bounded in view instead of
+  drifting the whole scene out of the camera frustum forever.
+  `galactic-frame?` similarly lets the guest branch (via a plain wasm `if`
+  — an i32 works directly as its condition) between the flat heliocentric
+  view and the tilt+forward-drift view, driven by a page-owned checkbox
+  via `setGalacticFrame` (see `setup-solar-render-host`'s return value).
+
   `:advanced` shadow-cljs optimization requires `unchecked-get`/`js-invoke`
   throughout (see `gpu_clear_host.cljs`'s header for why — Closure's
   property renaming silently breaks bare `.method`/`.-prop` interop against
   externs-less browser APIs).")
+
+;; ---------------------------------------------------------------------------
+;; Animation clock tuning (host-owned, purely illustrative -- see
+;; demo_solar_helix.kotoba's header for the matching forward-per-day
+;; compromise on the guest side). DAYS-PER-SECOND * WRAP-DAYS-worth of
+;; wall-clock time = one full wrap cycle (10s at these defaults) before the
+;; simulated day count resets to 0 and the whole animation loops.
+
+(def days-per-second 8.0)
+(def wrap-days 80.0)
 
 ;; ---------------------------------------------------------------------------
 ;; Body palette — id 0-8 matches kami-solar-helix-scene's `all-body-names`
@@ -172,7 +199,23 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 (defn setup-solar-render-host
   "Async, host-side, one-time WebGPU setup (device/context/pipeline/mesh/
   camera) -- call and await BEFORE instantiating the guest wasm module.
-  Resolves to a JS object `{imports: (fn [] importsObject)}`."
+  Resolves to a JS object `{imports: (fn [] importsObject), setGalacticFrame:
+  (fn [bool]), setFixedNowDays: (fn [days-or-null])}` -- `imports()` returns
+  the WebAssembly import object (`now_days`/`galactic_frame` included),
+  `setGalacticFrame` flips the view-toggle state `galactic_frame` reads on
+  its next call (wire it up to a page checkbox's `onchange`).
+  `setFixedNowDays` is a TEST-ONLY escape hatch: passing a number makes
+  `now_days` return exactly that value forever instead of computing it
+  from wall-clock time, making the render fully deterministic (no
+  dependency on real elapsed time between page load and the moment a
+  screenshot is taken) -- see `test/render/verify-render-solar-helix.mjs`,
+  which drives this via `?test_fixed_t=<days>` on the page URL. Passing
+  `nil`/`undefined` reverts to the normal wall-clock-driven behavior. The
+  page owns instantiating the guest module AND the `requestAnimationFrame`
+  loop that calls `instance.exports.main()` again every tick -- this fn
+  only sets up the one-time device/pipeline state and the per-tick
+  host-import closures over it, same division of responsibility Phase 0/1
+  already established."
   [canvas]
   (let [gpu (unchecked-get js/navigator "gpu")]
     (if (nil? gpu)
@@ -275,12 +318,23 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                    proj (mat4-perspective (/ js/Math.PI 3) (/ width height) 0.05 20.0)
                    view-proj (mat4-multiply proj view)
 
-                   positions (atom {})]
+                   positions (atom {})
+                   galactic-frame? (atom false)
+                   fixed-now-days (atom nil)
+                   start-ms (js/performance.now)]
                #js {"imports"
                     (fn []
                       #js {"kotoba"
                            #js {"cos" (fn [x] (js/Math.cos x))
                                 "sin" (fn [x] (js/Math.sin x))
+                                "now_days"
+                                (fn []
+                                  (if-let [fixed @fixed-now-days]
+                                    fixed
+                                    (let [elapsed-s (/ (- (js/performance.now) start-ms) 1000)]
+                                      (mod (* elapsed-s days-per-second) wrap-days))))
+                                "galactic_frame"
+                                (fn [] (if @galactic-frame? 1 0))
                                 "gpu_set_position"
                                 (fn [body-id x y z]
                                   (swap! positions assoc body-id [x y z])
@@ -318,4 +372,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                                         (js-invoke pass "drawIndexed" index-count)))
                                     (js-invoke pass "end")
                                     (js-invoke queue "submit" #js [(js-invoke encoder "finish")])
-                                    0))}})})))))))
+                                    0))}})
+                    "setGalacticFrame"
+                    (fn [on] (reset! galactic-frame? (boolean on)))
+                    "setFixedNowDays"
+                    (fn [days] (reset! fixed-now-days (when (some? days) (float days))))})))))))
