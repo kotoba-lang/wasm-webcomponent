@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "devDependencies": {
-    "shadow-cljs": "^2.28.20"
+    "shadow-cljs": "^2.28.20",
+    "playwright": "^1.59.0"
   },
   "scripts": {
     "compile:kami-engine-host": "shadow-cljs compile kami-engine-host",
@@ -12,6 +13,7 @@
     "release:gpu-clear-host": "shadow-cljs release gpu-clear-host",
     "compile:solar-render-host": "shadow-cljs compile solar-render-host",
     "release:solar-render-host": "shadow-cljs release solar-render-host",
-    "test": "for f in test/verify-*.mjs; do node \"$f\" || exit 1; done"
+    "test": "for f in test/verify-*.mjs; do node \"$f\" || exit 1; done",
+    "test:render": "for f in test/render/verify-*.mjs; do node \"$f\" || exit 1; done"
   }
 }

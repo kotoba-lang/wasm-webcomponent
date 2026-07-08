@@ -237,13 +237,26 @@ KotobaWasmElement.define('my-actor-host-demo', {
   documents from a real `cargo run`/wasmtime execution.
   `verify-gpu-clear-host.mjs`/`verify-solar-render-host.mjs` exercise the
   pure, GPU-free logic behind Phase 0/Phase 1 (bit-unpacking, mat4/vec3
-  math, sphere-mesh generation) directly — the actual WebGPU draw path in
-  both modules still needs a real browser to verify (see `examples/gpu-
-  clear/index.html`/`examples/solar-helix/index.html`).
-  `verify-solar-helix-guest.mjs` sweeps `demo_solar_helix.wasm`'s own
-  computed positions across the full `now-days` wrap range in both view
-  modes (finite, bounded, correctly-signed) — the guest-math half of the
-  live-animation investigation above, made a permanent regression check.
+  math, sphere-mesh generation) directly. The actual WebGPU draw path (pipeline
+  creation, bind groups, `queue.submit` timing, the real rendered pixels) is
+  no longer a human-only check — see `test/render/` and "Automated render
+  verification" below.
+  `verify-solar-helix-guest.mjs` separately sweeps `demo_solar_helix.wasm`'s
+  own computed positions (no GPU, no browser) across the full `now-days`
+  wrap range in both view modes (finite, bounded, correctly-signed) — the
+  guest-math half of the animation-toggle investigation in "Run an
+  example" below, made a permanent regression check.
+- `test/render/verify-render-gpu-clear.mjs` / `test/render/verify-render-solar-helix.mjs`
+  — real-pixel CI verification of `examples/gpu-clear`/`examples/solar-helix`'s
+  actual WebGPU draw path via a real headless browser (not a human with
+  claude-in-chrome). See "Automated render verification" below for what was
+  investigated, what these assert, and what's still out of scope.
+- `test/render/lib/webgpu-harness.mjs` / `test/render/lib/png-decode.mjs` —
+  shared, dependency-free (beyond the `playwright` devDependency itself)
+  helpers the two tests above use: a plain-Node static file server, a
+  Playwright launch helper that resolves the full (non-headless-shell)
+  Chromium binary, and a from-scratch PNG decoder (Node's built-in `zlib`
+  only) to read back actual pixel bytes from a canvas screenshot.
 
 ## Run an example
 
@@ -346,6 +359,107 @@ node test/verify-kami-engine-host.mjs
 node test/verify-gpu-clear-host.mjs
 node test/verify-solar-render-host.mjs
 ```
+
+Real-pixel WebGPU render verification is a separate command (needs the
+`playwright` devDependency + a downloaded browser, and — see below — a real
+GPU to be meaningful):
+
+```bash
+npm install
+npx playwright install chromium
+npm run test:render   # runs every test/render/verify-*.mjs
+```
+
+## Automated render verification (real pixels, CI)
+
+A prior maturity pass (ADR-2607078000 Addendum 7) gave `gpu-clear-host.cljs`/
+`solar-render-host.cljs`'s pure math/mesh helpers unit coverage but explicitly
+left one gap open: the actual WebGPU draw path (pipeline creation, bind
+groups, `queue.submit` timing, the real rendered pixels — where both real
+bugs Addendum 6 documents were actually found) had zero CI-runnable coverage
+and needed a human with claude-in-chrome to eyeball a GitHub Pages screenshot
+each time. `test/render/` closes that gap with real, automated, pixel-level
+assertions.
+
+**What was investigated: does headless WebGPU actually work?** Yes, but only
+under specific conditions this repo's harness (`test/render/lib/webgpu-harness.mjs`)
+now encodes:
+- Playwright's *default* headless Chromium resolution is not always
+  WebGPU-capable — on at least one platform tested here, the default
+  `chromium.launch({ headless: true })` resolves to the stripped-down
+  "headless shell" binary Playwright ships alongside the full Chromium
+  build, which has no `navigator.gpu` at all. The fix is `chromium.executablePath()`
+  (a public, version-independent Playwright API) passed explicitly as
+  `executablePath` — this reliably resolves to the *full* Chromium/"Chrome
+  for Testing" binary, which does have WebGPU, regardless of `headless`.
+- `navigator.gpu` is only populated on a real `http(s)` origin, not on a
+  fresh `about:blank` page — the harness always navigates before checking.
+- **macOS: works reliably, no special launch flags needed.** Verified
+  directly: `examples/gpu-clear` renders a pixel-perfect solid opaque-red
+  canvas, and `examples/solar-helix` renders all 9 bodies at their expected
+  positions with their expected colors (to within ~1-9 out of 255 per
+  channel — see `verify-render-solar-helix.mjs`'s header comment for why
+  that's expected to be this tight), matching this repo's own prior
+  claude-in-chrome/GitHub-Pages screenshots.
+- **Linux + SwiftShader software rendering: tested and found unreliable —
+  not wired into CI.** A Docker container matching the `mcr.microsoft.com/playwright`
+  image family, with `xvfb-run` + `--enable-unsafe-webgpu --enable-features=Vulkan
+  --use-angle=swiftshader --ignore-gpu-blocklist` (the flag set another repo
+  in this ecosystem's own investigation, `gftdcojp/network-isekai`'s
+  `scripts/isekai/capture.clj`, uses), got as far as `navigator.gpu.requestAdapter()`/
+  `requestDevice()` succeeding, but actual render-pass submission failed with
+  `Instance dropped in popErrorScope` and produced a blank canvas. This
+  matches this ecosystem's own prior, independent finding
+  (`gftdcojp/network-isekai`'s ADR-0025: "headless WebGPU itself remains
+  unavailable in this sandbox"). Given that, `render-verify`'s CI job targets
+  `runs-on: macos-latest` (real Apple Silicon hardware, a working Metal-backed
+  GPU process) instead of forcing an unreliable Linux/SwiftShader path.
+
+**What the two tests actually assert** (not just "did it throw"):
+- `verify-render-gpu-clear.mjs` — screenshots the canvas after the guest's
+  `(gpu-clear -16776961)` call, decodes the PNG (`test/render/lib/png-decode.mjs`,
+  a from-scratch decoder using only Node's built-in `zlib` — no image-decoding
+  npm dependency), and asserts every sampled interior pixel is opaque red
+  (`rgb(255,0,0)`, ±4 tolerance) — a real per-pixel color check.
+- `verify-render-solar-helix.mjs` — samples 9 hand-verified landmark screen
+  positions (one per body) and checks each against that body's *exact*
+  expected peak-lit color. Those expected colors aren't fuzzy estimates:
+  `solar_render_host.cljs`'s WGSL shader computes `lit = color.rgb * (0.35 +
+  0.65*ndotl)`, so at a sphere's most directly-lit point (`ndotl == 1`),
+  `lit == color` exactly — the raw `body-palette` value this repo's own
+  source already defines. A real regression (wrong color, a missing body,
+  or the buffer-aliasing bug reproducing) moves a landmark's measured color
+  far past this test's tolerance, not by a couple of units. Landmark
+  positions were picked over blob/connected-component detection specifically
+  because Venus visually overlaps the Sun's disk at this render's fixed
+  camera/t=45-day orbital phase — a real ambiguity for blind blob-counting,
+  not a bug, that per-landmark sampling sidesteps entirely.
+
+**Proof these actually discriminate pass/fail** (not just theoretically):
+both of Addendum 6's real historical bugs were deliberately reintroduced
+against a local worktree, rebuilt via `shadow-cljs release`, and confirmed to
+fail the corresponding test before being reverted:
+- Swapping the R/B channels in `gpu_clear_host.cljs`'s `clearValue` made
+  `verify-render-gpu-clear.mjs` fail with every sampled pixel reading
+  `rgb(0,0,255)` instead of `rgb(255,0,0)`.
+- Reverting `solar_render_host.cljs`'s per-body uniform buffer/bind-group
+  back to one shared buffer (the exact Addendum 6 bug) made
+  `verify-render-solar-helix.mjs` fail on 8 of 9 bodies — only Neptune (drawn
+  last) still rendered correctly, and the "distinct colors" check dropped
+  from 9 to 2, exactly the failure signature Addendum 6 describes ("every
+  draw referencing only the last write").
+
+**What this still doesn't cover** (honest, not silently fixed): geometric/mesh
+correctness beyond palette-color sampling (an entirely wrong mesh shape that
+still happened to cover these same landmark pixels with the same color would
+pass), camera-framing regressions too small to move a landmark color outside
+its search window, and anything about `examples/kami-engine-host/`'s
+`requestAnimationFrame`-driven tick loop (untouched by this pass — see its
+own outstanding real-browser-confirmation gap above). `WEBGPU_RENDER_TEST_SKIP_IF_UNAVAILABLE=1`
+lets these tests skip cleanly instead of failing red on a machine/CI runner
+without a working WebGPU adapter (e.g. local Linux dev machines) — CI itself
+does not set this, so a WebGPU regression on `macos-latest` fails loudly, not
+silently.
 
 ## Scope (honest R0)
 
