@@ -1,0 +1,47 @@
+(ns demo-solar-helix)
+
+;; Track B Phase 1 vertical slice (ADR-2607078000): a static single-frame
+;; render of kami-solar-helix-scene's 9 bodies (Sun + 8 planets), at a fixed
+;; t=45 days, using real semi-major-axis/sidereal-period data (same values
+;; as kotoba-lang/kami-solar-helix-scene's resources/solar-helix.edn) and
+;; real cos/sin host-imports for the orbital angle.
+;;
+;; Position is sqrt-scaled (not linear AU) so Mercury isn't crushed
+;; invisibly close to the Sun relative to Neptune -- a common schematic-
+;; diagram technique, and consistent with this whole project's stance that
+;; this is a schematic model, not an ephemeris. Orbital (x,y) maps to scene
+;; (x, 0, z) -- the ground plane -- so the flat heliocentric ellipse reads
+;; naturally under solar_render_host.cljs's elevated fixed camera.
+
+(defn ^:f32 theta [^:f32 period-days]
+  (f32div (f32* (f32 45.0) (f32 6.2831853)) period-days))
+
+(defn ^:f32 scaled-r [^:f32 r-au]
+  (f32* (f32sqrt r-au) (f32 0.25)))
+
+(defn ^:f32 orbit-x [^:f32 r-au ^:f32 period-days]
+  (f32* (scaled-r r-au) (cos (theta period-days))))
+
+(defn ^:f32 orbit-z [^:f32 r-au ^:f32 period-days]
+  (f32* (scaled-r r-au) (sin (theta period-days))))
+
+(defn main []
+  (do
+    (gpu-set-position 0 (f32 0.0) (f32 0.0) (f32 0.0)) ;; sun
+    (gpu-set-position 1
+      (orbit-x (f32 0.38710) (f32 87.9691)) (f32 0.0) (orbit-z (f32 0.38710) (f32 87.9691))) ;; mercury
+    (gpu-set-position 2
+      (orbit-x (f32 0.72333) (f32 224.701)) (f32 0.0) (orbit-z (f32 0.72333) (f32 224.701))) ;; venus
+    (gpu-set-position 3
+      (orbit-x (f32 1.0) (f32 365.256)) (f32 0.0) (orbit-z (f32 1.0) (f32 365.256))) ;; earth
+    (gpu-set-position 4
+      (orbit-x (f32 1.52366) (f32 686.980)) (f32 0.0) (orbit-z (f32 1.52366) (f32 686.980))) ;; mars
+    (gpu-set-position 5
+      (orbit-x (f32 5.20336) (f32 4332.59)) (f32 0.0) (orbit-z (f32 5.20336) (f32 4332.59))) ;; jupiter
+    (gpu-set-position 6
+      (orbit-x (f32 9.53707) (f32 10759.22)) (f32 0.0) (orbit-z (f32 9.53707) (f32 10759.22))) ;; saturn
+    (gpu-set-position 7
+      (orbit-x (f32 19.1913) (f32 30688.5)) (f32 0.0) (orbit-z (f32 19.1913) (f32 30688.5))) ;; uranus
+    (gpu-set-position 8
+      (orbit-x (f32 30.069) (f32 60182.0)) (f32 0.0) (orbit-z (f32 30.069) (f32 60182.0))) ;; neptune
+    (gpu-draw-frame)))

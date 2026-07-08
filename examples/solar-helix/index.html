@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Track B Phase 1 vertical slice: kami-solar-helix-scene guest-driven WebGPU render</title>
+</head>
+<body>
+<h1>kami-solar-helix-scene — guest-driven 3D render</h1>
+<p>
+  A compiled <code>.kotoba</code> guest (<code>demo_solar_helix.kotoba</code>)
+  computes all 9 bodies' positions (Sun + 8 planets, sqrt-scaled orbit radii,
+  real <code>cos</code>/<code>sin</code> host-imports for the orbital angle
+  at a fixed t=45 days) and calls <code>gpu-set-position</code> once per
+  body, then <code>gpu-draw-frame</code> once — a single static frame. All
+  matrix/camera/pipeline/mesh work stays host-side
+  (<code>src-cljs/kotoba/solar_render_host.cljs</code>); the guest only
+  decides where each sphere goes. See ADR-2607078000 Track B Phase 1.
+</p>
+<canvas id="c" width="480" height="360" style="border:1px solid #888"></canvas>
+<pre id="out">loading...</pre>
+<script type="module">
+  import { setupSolarRenderHost } from '../../src/solar-render-host.js';
+
+  const out = document.getElementById('out');
+  const canvas = document.getElementById('c');
+  try {
+    const host = await setupSolarRenderHost(canvas);
+    const res = await fetch('./demo_solar_helix.wasm');
+    const wasmBytes = new Uint8Array(await res.arrayBuffer());
+    const { instance } = await WebAssembly.instantiate(wasmBytes, host.imports());
+    const result = instance.exports.main();
+    out.textContent = `main() -> ${result} (0 = success). 9 bodies (Sun + 8 planets) should be visible.`;
+  } catch (e) {
+    out.textContent = `FAILED: ${e.message}\n${e.stack || ''}`;
+  }
+</script>
+</body>
+</html>
