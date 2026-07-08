@@ -208,20 +208,35 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                    _ (js-invoke queue "writeBuffer" index-buffer 0 (:indices mesh))
                    index-count (.-length (:indices mesh))
 
-                   uniform-buffer (js-invoke device "createBuffer"
-                                   #js {"size" 80 ; 64 (mat4) + 16 (vec4 color)
-                                        "usage" (bit-or (unchecked-get js/GPUBufferUsage "UNIFORM")
-                                                         (unchecked-get js/GPUBufferUsage "COPY_DST"))})
-
                    shader-module (js-invoke device "createShaderModule" #js {"code" wgsl-shader})
                    bind-group-layout (js-invoke device "createBindGroupLayout"
                                       #js {"entries" #js [#js {"binding" 0
                                                                 "visibility" (bit-or (unchecked-get js/GPUShaderStage "VERTEX")
                                                                                       (unchecked-get js/GPUShaderStage "FRAGMENT"))
                                                                 "buffer" #js {"type" "uniform"}}]})
-                   bind-group (js-invoke device "createBindGroup"
-                               #js {"layout" bind-group-layout
-                                    "entries" #js [#js {"binding" 0 "resource" #js {"buffer" uniform-buffer}}]})
+                   ;; ONE uniform buffer + bind group PER body slot (not one
+                   ;; shared buffer reused across the draw loop): queue.
+                   ;; writeBuffer executes immediately, but pass.drawIndexed
+                   ;; calls only RECORD into the command encoder -- they
+                   ;; don't actually run until queue.submit() at the very
+                   ;; end of gpu_draw_frame. A single shared buffer written
+                   ;; 9x in a row before any of the 9 recorded draws
+                   ;; executes means every draw would see only the LAST
+                   ;; write (found via real-browser verification: nothing
+                   ;; rendered until this fix). Per-slot buffers make each
+                   ;; draw call reference its own body's data regardless of
+                   ;; write/submit timing.
+                   uniform-buffers (mapv (fn [_]
+                                            (js-invoke device "createBuffer"
+                                             #js {"size" 80 ; 64 (mat4) + 16 (vec4 color)
+                                                  "usage" (bit-or (unchecked-get js/GPUBufferUsage "UNIFORM")
+                                                                   (unchecked-get js/GPUBufferUsage "COPY_DST"))}))
+                                          body-palette)
+                   bind-groups (mapv (fn [buf]
+                                        (js-invoke device "createBindGroup"
+                                         #js {"layout" bind-group-layout
+                                              "entries" #js [#js {"binding" 0 "resource" #js {"buffer" buf}}]}))
+                                      uniform-buffers)
                    pipeline-layout (js-invoke device "createPipelineLayout"
                                     #js {"bindGroupLayouts" #js [bind-group-layout]})
                    pipeline (js-invoke device "createRenderPipeline"
@@ -289,8 +304,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                                         (.set uniform-data mvp 0)
                                         (aset uniform-data 16 r) (aset uniform-data 17 g)
                                         (aset uniform-data 18 b) (aset uniform-data 19 1.0)
-                                        (js-invoke queue "writeBuffer" uniform-buffer 0 uniform-data)
-                                        (js-invoke pass "setBindGroup" 0 bind-group)
+                                        (js-invoke queue "writeBuffer" (nth uniform-buffers id) 0 uniform-data)
+                                        (js-invoke pass "setBindGroup" 0 (nth bind-groups id))
                                         (js-invoke pass "drawIndexed" index-count)))
                                     (js-invoke pass "end")
                                     (js-invoke queue "submit" #js [(js-invoke encoder "finish")])
