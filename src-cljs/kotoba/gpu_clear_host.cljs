@@ -21,9 +21,11 @@
   `>>> 0` (reinterpret the signed i32 as unsigned) then byte-shifted into
   four 0.0-1.0 WebGPU clear-color channels.")
 
-(defn- unpack-rgba8
+(defn unpack-rgba8
   "Signed i32 bit pattern -> [r g b a] each 0.0-1.0, per gpu-clear's wire
-  format (0xRRGGBBAA packed color)."
+  format (0xRRGGBBAA packed color). Public (not `defn-`) specifically so
+  it's directly unit-testable without a GPU -- see
+  test/gpu_clear_host_test.cljs."
   [i32-signed]
   (let [u (unsigned-bit-shift-right i32-signed 0)] ; reinterpret as u32
     [(/ (bit-and (unsigned-bit-shift-right u 24) 0xff) 255.0)

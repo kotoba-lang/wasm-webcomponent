@@ -172,6 +172,47 @@ KotobaWasmElement.define('my-actor-host-demo', {
   (the same fixture `kami-script-runtime-rs/tests/fixtures/` ships) driven
   for 300 ticks via `requestAnimationFrame` (real-browser confirmation
   outstanding — see ADR-2607078000's Consequences).
+- `src-cljs/kotoba/gpu_clear_host.cljs` / `src/gpu-clear-host.js` — ADR-
+  2607078000 Track B **Phase 0**: the browser host for the `gpu-clear`
+  capability, the first proof that a compiled `.kotoba` guest can drive a
+  real WebGPU canvas clear through a genuinely synchronous Wasm
+  host-import (no JSPI / `Atomics.wait` bridge needed — `requestAdapter`/
+  `requestDevice` are the only async WebGPU calls, and they run once,
+  host-side, before the guest ever executes). Wire format:
+  `gpu_clear(rgba8: i32) -> i32`, a packed `0xRRGGBBAA` color. Exports
+  `setupGpuClearHost(canvas)` (async, one-time device/context setup) and
+  `unpackRgba8` (the pure signed-i32→`[r,g,b,a]` bit-unpacking logic,
+  public specifically so it's unit-testable without a GPU — see
+  `test/verify-gpu-clear-host.mjs`). Regenerate via `npm run
+  compile:gpu-clear-host` / `release:gpu-clear-host`.
+- `examples/gpu-clear/` — `demo_gpu_clear.kotoba`/`.wasm` (a `.kotoba`
+  guest that calls `gpu_clear` with a packed color) + `index.html`,
+  browser-verified against `setupGpuClearHost` end to end.
+- `src-cljs/kotoba/solar_render_host.cljs` / `src/solar-render-host.js` —
+  ADR-2607078000 Track B **Phase 1**: the browser host for
+  `gpu-set-position`/`gpu-draw-frame`, rendering `kami-solar-helix-scene`'s
+  9 bodies (Sun + 8 planets) as spheres. The guest (compiled from
+  `demo_solar_helix.kotoba`) computes each body's position every frame via
+  real `cos`/`sin` host-imports and calls `gpu-set-position(body-id, x, y,
+  z)` once per body, then `gpu-draw-frame()` once — all matrix/camera/
+  pipeline/mesh mechanics stay host-side, since `.kotoba` has no vector/
+  matrix type. One dedicated uniform buffer + bind group per body (9
+  total, not one shared buffer) — `queue.writeBuffer` runs immediately but
+  `pass.drawIndexed` only records until `queue.submit()`, so a single
+  shared buffer written 9× before any draw executes would leave every draw
+  referencing only the last write. Exports `setupSolarRenderHost(canvas)`
+  plus its pure mat4/vec3/mesh helpers (`mat4Multiply`/`mat4Perspective`/
+  `mat4LookAt`/`mat4TranslationScale`/`vec3Normalize`/`vec3Sub`/
+  `vec3Cross`/`vec3Dot`/`buildSphereMesh`), public specifically so they're
+  unit-testable without a GPU — see `test/verify-solar-render-host.mjs`.
+  Regenerate via `npm run compile:solar-render-host` /
+  `release:solar-render-host`.
+- `examples/solar-helix/` — `demo_solar_helix.kotoba`/`.wasm` (the 9-body
+  orbital-math guest, using `.kotoba`'s real `f32` support — `kotoba-lang/
+  kotoba`'s compiler gained native f32 params/locals/results/comparisons
+  for this) + `index.html`, browser-verified: all 9 bodies render in
+  frame, matching `kami-solar-helix-scene`'s already-tested physics
+  (pitch-to-circumference ratio ~7.4x/~16.8x).
 - `test/verify-*.mjs` — dependency-free Node smoke tests (same
   `WebAssembly` engine — V8 — a Chromium browser uses) for each example.
   They check the AOT-execution / host-import claims only; they do not
@@ -182,6 +223,11 @@ KotobaWasmElement.define('my-actor-host-demo', {
   fixture for the same 300 ticks and asserts the exact same entity counts
   (`entities=16 shiro-pico=1 ghost=14 beat-spark=1`) that crate's own README
   documents from a real `cargo run`/wasmtime execution.
+  `verify-gpu-clear-host.mjs`/`verify-solar-render-host.mjs` exercise the
+  pure, GPU-free logic behind Phase 0/Phase 1 (bit-unpacking, mat4/vec3
+  math, sphere-mesh generation) directly — the actual WebGPU draw path in
+  both modules still needs a real browser to verify (see `examples/gpu-
+  clear/index.html`/`examples/solar-helix/index.html`).
 
 ## Run an example
 
@@ -224,12 +270,17 @@ repeat them:
 ## Run the tests
 
 ```bash
+npm test   # runs every test/verify-*.mjs in sequence, stops on first failure
+
+# or individually:
 node test/verify-hello.mjs
 node test/verify-kgraph.mjs
 node test/verify-gcd.mjs
 node test/verify-cap.mjs
 node test/verify-actor-host.mjs
 node test/verify-kami-engine-host.mjs
+node test/verify-gpu-clear-host.mjs
+node test/verify-solar-render-host.mjs
 ```
 
 ## Scope (honest R0)

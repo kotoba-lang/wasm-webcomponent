@@ -7,6 +7,11 @@
   },
   "scripts": {
     "compile:kami-engine-host": "shadow-cljs compile kami-engine-host",
-    "release:kami-engine-host": "shadow-cljs release kami-engine-host"
+    "release:kami-engine-host": "shadow-cljs release kami-engine-host",
+    "compile:gpu-clear-host": "shadow-cljs compile gpu-clear-host",
+    "release:gpu-clear-host": "shadow-cljs release gpu-clear-host",
+    "compile:solar-render-host": "shadow-cljs compile solar-render-host",
+    "release:solar-render-host": "shadow-cljs release solar-render-host",
+    "test": "for f in test/verify-*.mjs; do node \"$f\" || exit 1; done"
   }
 }
