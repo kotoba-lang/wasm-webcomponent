@@ -19,4 +19,11 @@
    :output-dir "src"
    :modules {:gpu-clear-host
              {:exports {setupGpuClearHost kotoba.gpu-clear-host/setup-gpu-clear-host}}}
+   :release {:compiler-options {:optimizations :advanced}}}
+
+  :solar-render-host
+  {:target :esm
+   :output-dir "src"
+   :modules {:solar-render-host
+             {:exports {setupSolarRenderHost kotoba.solar-render-host/setup-solar-render-host}}}
    :release {:compiler-options {:optimizations :advanced}}}}}
