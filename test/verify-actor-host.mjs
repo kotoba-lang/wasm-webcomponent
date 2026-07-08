@@ -66,6 +66,36 @@ check(
 const granted = validateImportSurface(['clock-monotonic', 'sha256-hex'], hostCaps({ grants: ['clock-monotonic', 'sha256-hex'] }));
 check(granted.ok === true, `clock-monotonic+sha256-hex granted and requested both pass validation (got ${JSON.stringify(granted.errors)})`);
 
+// ── validateImportSurface: the remaining four denial branches, previously
+// untested (only grants/missing and limit/secret-imports had coverage
+// above) ────────────────────────────────────────────────────────────────
+const unknownImport = validateImportSurface(['bogus-import'], hostCaps());
+check(
+  unknownImport.ok === false && unknownImport.errors.some((e) => e.error === 'imports/unknown'),
+  `an id outside IMPORT_SURFACE is imports/unknown, not silently ignored (got ${JSON.stringify(unknownImport.errors)})`
+);
+
+const overMaxImports = validateImportSurface(
+  ['clock-monotonic', 'sha256-hex'],
+  hostCaps({ grants: ['clock-monotonic', 'sha256-hex'], limits: { maxImports: 1 } })
+);
+check(
+  overMaxImports.ok === false && overMaxImports.errors.some((e) => e.error === 'limit/max-imports'),
+  `requesting 2 known imports against maxImports:1 is limit/max-imports (got ${JSON.stringify(overMaxImports.errors)})`
+);
+
+const overMaxHttpPosts = validateImportSurface(['http-post'], hostCaps({ grants: ['http-post'], limits: { maxHttpPosts: 0 } }));
+check(
+  overMaxHttpPosts.ok === false && overMaxHttpPosts.errors.some((e) => e.error === 'limit/max-http-posts'),
+  `http-post granted but over maxHttpPosts:0 is limit/max-http-posts, distinct from grants/missing (got ${JSON.stringify(overMaxHttpPosts.errors)})`
+);
+
+const writeDeniedByDefault = validateImportSurface(['log-write'], hostCaps({ grants: ['log-write'] }));
+check(
+  writeDeniedByDefault.ok === false && writeDeniedByDefault.errors.some((e) => e.error === 'limit/write-imports'),
+  `log-write granted but allowWriteImports defaults to false is limit/write-imports (got ${JSON.stringify(writeDeniedByDefault.errors)})`
+);
+
 // ── actorHostImports: pre-flight rejection (no memory box even touched) ────
 let preflightThrew = false;
 try {
@@ -90,6 +120,25 @@ check(preflightThrew, 'actorHostImports throws pre-flight when the surface is re
   const second = fns.log_write(0, 4); // now 8 bytes total, over the 4-byte cap
   check(first === 0, `first 4-byte write succeeds (got ${first})`);
   check(second === -1, `second write exceeding maxLogWriteBytes=4 returns -1, not a throw (got ${second})`);
+}
+
+// ── actorHostImports: log_read's maxLogReadBytes exhaustion, the read-side
+// mirror of maxLogWriteBytes above -- previously untested (only the write
+// side had a test) ─────────────────────────────────────────────────────
+{
+  const store = inMemoryStore();
+  store.append(new Uint8Array([1, 2, 3])); // 3 bytes, read again (not consumed) each call
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const fns = actorHostImports(
+    ['log-read'],
+    hostCaps({ grants: ['log-read'], limits: { maxLogReadBytes: 4 } }),
+    memoryBox,
+    { store }
+  );
+  const first = fns.log_read(0, 100);
+  const second = fns.log_read(0, 100); // now 6 accumulated bytes, over the 4-byte cap
+  check(first === 3, `first read (3 bytes, under maxLogReadBytes=4) succeeds (got ${first})`);
+  check(second === -1, `second read pushes accumulated logReadBytes to 6, over the cap -- returns -1, not a throw (got ${second})`);
 }
 
 // ── real native-WebAssembly round trip (module "kotoba", same convention
