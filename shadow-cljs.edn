@@ -12,4 +12,11 @@
    :modules {:kami-engine-host
              {:exports {createKamiEngineHost kotoba.kami-engine-host/create-kami-engine-host
                         orderedTickExports kotoba.kami-engine-host/ordered-tick-exports}}}
+   :release {:compiler-options {:optimizations :advanced}}}
+
+  :gpu-clear-host
+  {:target :esm
+   :output-dir "src"
+   :modules {:gpu-clear-host
+             {:exports {setupGpuClearHost kotoba.gpu-clear-host/setup-gpu-clear-host}}}
    :release {:compiler-options {:optimizations :advanced}}}}}
