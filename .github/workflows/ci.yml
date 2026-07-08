@@ -5,13 +5,45 @@ on:
   pull_request:
 jobs:
   test:
+    # GPU-free, dependency-free-logic tests: AOT WebAssembly execution +
+    # host-import behavior (test/verify-*.mjs) run against Node's own
+    # WebAssembly engine (same V8 a Chromium browser uses). `npm test` runs
+    # every test/verify-*.mjs file -- previously this job hardcoded only 4 of
+    # what are now 8 (verify-actor-host.mjs/verify-kami-engine-host.mjs/
+    # verify-gpu-clear-host.mjs/verify-solar-render-host.mjs had never been
+    # wired in since they were added), a real CI gap this closes.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: node test/verify-hello.mjs
-      - run: node test/verify-kgraph.mjs
-      - run: node test/verify-gcd.mjs
-      - run: node test/verify-cap.mjs
+      - run: npm ci
+      - run: npm test
+
+  render-verify:
+    # Real-pixel WebGPU render verification (test/render/verify-render-*.mjs)
+    # -- actually drives a headless browser and asserts on decoded canvas
+    # pixel data, closing the gap ADR-2607078000 Addendum 7 left open (the
+    # pure math/mesh helpers had unit coverage, but pipeline creation, bind
+    # groups, queue.submit timing, and the actual rendered pixels did not,
+    # and needed a human with claude-in-chrome to eyeball a screenshot).
+    #
+    # Runs on macos-latest deliberately, not ubuntu-latest: this needs a real
+    # GPU. GitHub's ubuntu-latest runners have none, and this repo's own
+    # investigation (see README's "Automated render verification" section)
+    # found headless Chromium + SwiftShader software rendering on Linux
+    # unreliable in practice (a Docker container matching this exact image
+    # produced "Instance dropped in popErrorScope" WebGPU errors and blank
+    # canvases). macos-latest runners are real Apple Silicon hardware with a
+    # working Metal-backed GPU process, which this was verified against
+    # directly and found to render correctly and deterministically.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: npm run test:render
