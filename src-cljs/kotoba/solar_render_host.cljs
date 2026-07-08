@@ -262,8 +262,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                    ;; Fixed camera: looking at the origin from outside the
                    ;; scaled-down orbit cluster (positions arrive already
                    ;; scaled by the guest into a roughly [-1,1] box).
-                   view (mat4-look-at [0 0.9 1.6] [0 0 0] [0 1 0])
-                   proj (mat4-perspective (/ js/Math.PI 4) (/ width height) 0.05 20.0)
+                   ;; Pulled back + widened from the first pass, which cut
+                   ;; off Uranus/Neptune (found via real-browser
+                   ;; verification -- 7/9 bodies visible, outer two just
+                   ;; outside the frustum) -- enough margin for Neptune's
+                   ;; r~1.37 scaled orbit at any angle, not just this one t.
+                   view (mat4-look-at [0 1.5 2.7] [0 0 0] [0 1 0])
+                   proj (mat4-perspective (/ js/Math.PI 3) (/ width height) 0.05 20.0)
                    view-proj (mat4-multiply proj view)
 
                    positions (atom {})]
