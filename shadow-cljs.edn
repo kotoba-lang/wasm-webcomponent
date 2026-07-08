@@ -35,5 +35,6 @@
                         vec3Sub kotoba.solar-render-host/vec3-sub
                         vec3Cross kotoba.solar-render-host/vec3-cross
                         vec3Dot kotoba.solar-render-host/vec3-dot
-                        buildSphereMesh kotoba.solar-render-host/build-sphere-mesh}}}
+                        buildSphereMesh kotoba.solar-render-host/build-sphere-mesh
+                        wrapNowDays kotoba.solar-render-host/wrap-now-days}}}
    :release {:compiler-options {:optimizations :advanced}}}}}

@@ -11,6 +11,7 @@ import {
   vec3Cross,
   vec3Dot,
   buildSphereMesh,
+  wrapNowDays,
 } from '../src/solar-render-host.js';
 
 let failed = false;
@@ -118,5 +119,29 @@ check(
   check(allIndicesInRange, `every index is within [0, ${vertexCount}) -- no out-of-bounds triangle references`);
 }
 
+// wrapNowDays(elapsed-s) = (elapsed-s * days-per-second) mod wrap-days --
+// pulled out of the now_days host-import closure specifically so this
+// wall-clock -> bounded-simulated-day mapping is testable without a fake
+// clock. Constants baked into solar_render_host.cljs: days-per-second=8.0,
+// wrap-days=80.0 (a 10-real-second wrap cycle at these defaults).
+check(wrapNowDays(0) === 0, 'wrapNowDays(0) === 0 (no time elapsed yet)');
+check(close(wrapNowDays(5), 40), 'wrapNowDays(5) === 40 (5s * 8 days/s, well inside one wrap cycle)');
+check(close(wrapNowDays(10), 0), 'wrapNowDays(10) === 0 -- exactly one full wrap cycle (10s * 8 days/s = 80 = wrap-days), wraps back to 0 rather than reporting 80');
+check(close(wrapNowDays(12.5), 20), 'wrapNowDays(12.5) === 20 -- past one full cycle, wraps correctly (12.5s * 8 = 100, 100 mod 80 = 20)');
+{
+  // Sweep a wide range of elapsed-s (well past many wrap cycles, as a
+  // long-running page would eventually reach) and confirm the result
+  // never leaves [0, wrap-days) and is never NaN/negative -- this is
+  // exactly the invariant demo_solar_helix.kotoba's galactic-frame
+  // forward-drift math depends on to never grow unbounded.
+  const WRAP_DAYS = 80;
+  let allInRange = true;
+  for (let s = 0; s <= 1000; s += 0.37) {
+    const d = wrapNowDays(s);
+    if (!(Number.isFinite(d) && d >= 0 && d < WRAP_DAYS)) allInRange = false;
+  }
+  check(allInRange, `wrapNowDays stays within [0, ${WRAP_DAYS}) for elapsed-s swept from 0 to 1000 (many wrap cycles), never NaN/negative/out-of-range`);
+}
+
 if (failed) process.exit(1);
-console.log('OK: solar-render-host.js\'s mat4/vec3/sphere-mesh pure logic all matches hand-worked expected values, with no GPU involved');
+console.log('OK: solar-render-host.js\'s mat4/vec3/sphere-mesh/wrap-clock pure logic all matches hand-worked expected values, with no GPU involved');
