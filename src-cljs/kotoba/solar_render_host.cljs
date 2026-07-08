@@ -42,11 +42,11 @@
    {:color [0.2 0.35 0.85] :radius 0.04}]) ;; neptune
 
 ;; ---------------------------------------------------------------------------
-;; mat4 helpers (column-major, WGSL/WebGPU convention) -- no external dep.
+;; mat4/vec3 helpers (column-major, WGSL/WebGPU convention) -- no external
+;; dep. Public (not `defn-`) specifically so they're directly unit-testable
+;; without a GPU -- see test/solar_render_host_test.cljs.
 
-(defn- mat4-identity [] (js/Float32Array. #js [1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1]))
-
-(defn- mat4-multiply
+(defn mat4-multiply
   "a * b, both column-major Float32Array(16)."
   [a b]
   (let [out (js/Float32Array. 16)]
@@ -61,7 +61,7 @@
                    (* (aget a (+ 12 row)) b3))))))
     out))
 
-(defn- mat4-perspective
+(defn mat4-perspective
   "Right-handed perspective projection, WebGPU depth range [0,1] (not
   OpenGL's [-1,1]). fovy-radians/aspect/near/far standard."
   [fovy-radians aspect near far]
@@ -73,16 +73,16 @@
           0 0 (* far range-inv) -1
           0 0 (* far near range-inv) 0])))
 
-(defn- vec3-normalize [[x y z]]
+(defn vec3-normalize [[x y z]]
   (let [len (js/Math.sqrt (+ (* x x) (* y y) (* z z)))]
     (if (< len 1e-9) [0 0 0] [(/ x len) (/ y len) (/ z len)])))
 
-(defn- vec3-sub [[ax ay az] [bx by bz]] [(- ax bx) (- ay by) (- az bz)])
-(defn- vec3-cross [[ax ay az] [bx by bz]]
+(defn vec3-sub [[ax ay az] [bx by bz]] [(- ax bx) (- ay by) (- az bz)])
+(defn vec3-cross [[ax ay az] [bx by bz]]
   [(- (* ay bz) (* az by)) (- (* az bx) (* ax bz)) (- (* ax by) (* ay bx))])
-(defn- vec3-dot [[ax ay az] [bx by bz]] (+ (* ax bx) (* ay by) (* az bz)))
+(defn vec3-dot [[ax ay az] [bx by bz]] (+ (* ax bx) (* ay by) (* az bz)))
 
-(defn- mat4-look-at
+(defn mat4-look-at
   "Right-handed view matrix. eye/target/up are [x y z] vectors."
   [eye target up]
   (let [z (vec3-normalize (vec3-sub eye target))
@@ -94,7 +94,7 @@
           (nth x 2) (nth y 2) (nth z 2) 0
           (- (vec3-dot x eye)) (- (vec3-dot y eye)) (- (vec3-dot z eye)) 1])))
 
-(defn- mat4-translation-scale
+(defn mat4-translation-scale
   "Translate by [x y z] then uniformly scale by `s` -- enough for a sphere
   instance (no rotation needed, spheres look the same from every angle)."
   [x y z s]
@@ -108,7 +108,9 @@
 ;; Sphere mesh -- a small UV sphere (positions + normals interleaved,
 ;; 16-bit indices), generated once and reused for every instance.
 
-(defn- build-sphere-mesh
+(defn build-sphere-mesh
+  "Public (not `defn-`) specifically so it's directly unit-testable without a
+  GPU -- see test/solar_render_host_test.cljs."
   [lat-bands lon-bands]
   (let [vertices (transient [])
         indices (transient [])]
@@ -127,8 +129,8 @@
               second (+ first lon-bands 1)]
           (conj! indices first) (conj! indices second) (conj! indices (inc first))
           (conj! indices second) (conj! indices (inc second)) (conj! indices (inc first)))))
-    {:vertices (js/Float32Array. (clj->js (persistent! vertices)))
-     :indices (js/Uint16Array. (clj->js (persistent! indices)))}))
+    #js {"vertices" (js/Float32Array. (clj->js (persistent! vertices)))
+         "indices" (js/Uint16Array. (clj->js (persistent! indices)))}))
 
 ;; ---------------------------------------------------------------------------
 ;; WGSL shader: per-vertex position+normal (unit sphere, model-space),
@@ -196,17 +198,19 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                    depth-view (js-invoke depth-texture "createView")
 
                    mesh (build-sphere-mesh 12 16)
+                   mesh-vertices (unchecked-get mesh "vertices")
+                   mesh-indices (unchecked-get mesh "indices")
                    vertex-buffer (js-invoke device "createBuffer"
-                                  #js {"size" (* (.-length (:vertices mesh)) 4)
+                                  #js {"size" (* (.-length mesh-vertices) 4)
                                        "usage" (bit-or (unchecked-get js/GPUBufferUsage "VERTEX")
                                                         (unchecked-get js/GPUBufferUsage "COPY_DST"))})
                    index-buffer (js-invoke device "createBuffer"
-                                 #js {"size" (* (js/Math.ceil (/ (.-length (:indices mesh)) 2)) 4)
+                                 #js {"size" (* (js/Math.ceil (/ (.-length mesh-indices) 2)) 4)
                                       "usage" (bit-or (unchecked-get js/GPUBufferUsage "INDEX")
                                                        (unchecked-get js/GPUBufferUsage "COPY_DST"))})
-                   _ (js-invoke queue "writeBuffer" vertex-buffer 0 (:vertices mesh))
-                   _ (js-invoke queue "writeBuffer" index-buffer 0 (:indices mesh))
-                   index-count (.-length (:indices mesh))
+                   _ (js-invoke queue "writeBuffer" vertex-buffer 0 mesh-vertices)
+                   _ (js-invoke queue "writeBuffer" index-buffer 0 mesh-indices)
+                   index-count (.-length mesh-indices)
 
                    shader-module (js-invoke device "createShaderModule" #js {"code" wgsl-shader})
                    bind-group-layout (js-invoke device "createBindGroupLayout"
