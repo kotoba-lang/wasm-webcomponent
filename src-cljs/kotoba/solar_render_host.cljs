@@ -255,7 +255,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                #js {"imports"
                     (fn []
                       #js {"kotoba"
-                           #js {"gpu_set_position"
+                           #js {"cos" (fn [x] (js/Math.cos x))
+                                "sin" (fn [x] (js/Math.sin x))
+                                "gpu_set_position"
                                 (fn [body-id x y z]
                                   (swap! positions assoc body-id [x y z])
                                   0)
