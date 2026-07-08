@@ -27,10 +27,16 @@
 ;; preserve the exact ratio for every body simultaneously with one shared
 ;; linear forward rate -- but the qualitative trend this whole project is
 ;; about (farther/slower bodies stretch out more per orbit) still holds.
+;; Negative, not positive: solar_render_host.cljs's fixed camera sits at
+;; z=+2.7 looking toward the origin, so a POSITIVE z shift moves bodies
+;; TOWARD the camera (clipping past the near plane and vanishing within a
+;; couple of real seconds -- found via real-browser verification, not
+;; assumed); negative z is "away", which the far=20 clip plane has ample
+;; room for over one bounded now-days wrap cycle.
 
 (defn ^:f32 cos-tilt [] (f32 0.5))
 (defn ^:f32 sin-tilt [] (f32 0.8660254))
-(defn ^:f32 forward-per-day [] (f32 0.03176516))
+(defn ^:f32 forward-per-day [] (f32 -0.03176516))
 
 (defn ^:f32 theta [^:f32 t-days ^:f32 period-days]
   (f32div (f32* t-days (f32 6.2831853)) period-days))

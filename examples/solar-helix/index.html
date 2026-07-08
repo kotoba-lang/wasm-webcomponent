@@ -32,7 +32,7 @@
 <canvas id="c" width="480" height="360" style="border:1px solid #888"></canvas>
 <pre id="out">loading...</pre>
 <script type="module">
-  import { setupSolarRenderHost } from '../../src/solar-render-host.js?v=5';
+  import { setupSolarRenderHost } from '../../src/solar-render-host.js?v=6';
 
   const out = document.getElementById('out');
   const canvas = document.getElementById('c');
@@ -41,7 +41,7 @@
     const host = await setupSolarRenderHost(canvas);
     toggle.addEventListener('change', () => host.setGalacticFrame(toggle.checked));
 
-    const res = await fetch('./demo_solar_helix.wasm');
+    const res = await fetch('./demo_solar_helix.wasm?v=2');
     const wasmBytes = new Uint8Array(await res.arrayBuffer());
     const { instance } = await WebAssembly.instantiate(wasmBytes, host.imports());
 
