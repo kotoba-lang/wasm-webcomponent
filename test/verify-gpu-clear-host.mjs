@@ -2,7 +2,7 @@
 // the pure bit-unpacking logic behind the `gpu_clear` host-import (ADR-
 // 2607078000 Track B Phase 0), directly testable without a GPU/WebGPU
 // context. Run: `node test/verify-gpu-clear-host.mjs`
-import { unpackRgba8 } from '../src/gpu-clear-host.js';
+import { setupGpuClearHost, unpackRgba8 } from '../src/gpu-clear-host.js';
 
 let failed = false;
 function check(cond, message) {
@@ -46,6 +46,40 @@ check(closeArr(unpackRgba8(0x0000ffff | 0), [0, 0, 1, 1]), 'rgba8(0x0000FFFF) ->
     Math.abs(r - expected) < 1e-9 && Math.abs(g - expected) < 1e-9 && Math.abs(b - expected) < 1e-9 && Math.abs(a - expected) < 1e-9,
     `rgba8(0x80808080) -> every channel ${expected.toFixed(6)} (got r=${r} g=${g} b=${b} a=${a})`
   );
+}
+
+// setupGpuClearHost's two fail-closed setup branches, run without any real
+// WebGPU context. Node's global `navigator` has no `.gpu`, so the first
+// check exercises today's actual environment; the second temporarily
+// replaces `navigator` (a configurable-but-setter-less global accessor) via
+// Object.defineProperty to force requestAdapter to resolve null.
+await setupGpuClearHost({}).then(
+  () => check(false, 'setupGpuClearHost({}) should reject when navigator.gpu is unavailable'),
+  (e) =>
+    check(
+      /navigator\.gpu unavailable/.test(e.message),
+      `setupGpuClearHost({}) rejects with a WebGPU-unavailable message (got "${e.message}")`
+    )
+);
+
+{
+  const savedDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { gpu: { requestAdapter: async () => null } },
+    configurable: true,
+  });
+  try {
+    await setupGpuClearHost({}).then(
+      () => check(false, 'setupGpuClearHost({}) should reject when requestAdapter resolves null'),
+      (e) =>
+        check(
+          /requestAdapter returned null/.test(e.message),
+          `setupGpuClearHost({}) rejects when requestAdapter resolves null (got "${e.message}")`
+        )
+    );
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', savedDesc);
+  }
 }
 
 if (failed) process.exit(1);

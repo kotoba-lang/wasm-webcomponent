@@ -50,6 +50,18 @@ check(
   `orderedTickExports found at least one -tick export (got ${JSON.stringify(systems)})`
 );
 
+// orderedTickExports's `(if (< len 8) [] ...)` guard against a byte buffer
+// too short to contain a valid wasm header/section -- never hit by the real
+// fixture above. Lock in the fail-safe-empty behavior for truncated input.
+check(
+  orderedTickExports(new Uint8Array(0)).length === 0,
+  'orderedTickExports on an empty buffer returns [] rather than throwing'
+);
+check(
+  orderedTickExports(new Uint8Array(4)).length === 0,
+  'orderedTickExports on a 4-byte buffer (below the len<8 guard) returns []'
+);
+
 host.callInit();
 
 for (let i = 0; i < 300; i++) {
