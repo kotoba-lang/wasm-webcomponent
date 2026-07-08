@@ -320,12 +320,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                                 "sin" (fn [x] (js/Math.sin x))
                                 "now_days"
                                 (fn []
-                                  (let [elapsed-s (/ (- (js/performance.now) start-ms) 1000)]
-                                    (mod (* elapsed-s days-per-second) wrap-days)))
+                                  (let [elapsed-s (/ (- (js/performance.now) start-ms) 1000)
+                                        days (mod (* elapsed-s days-per-second) wrap-days)]
+                                    (js/console.log "DEBUG now_days" elapsed-s days)
+                                    days))
                                 "galactic_frame"
                                 (fn [] (if @galactic-frame? 1 0))
                                 "gpu_set_position"
                                 (fn [body-id x y z]
+                                  (js/console.log "DEBUG gpu_set_position" body-id x y z)
                                   (swap! positions assoc body-id [x y z])
                                   0)
                                 "gpu_draw_frame"
