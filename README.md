@@ -217,14 +217,18 @@ KotobaWasmElement.define('my-actor-host-demo', {
   (`galactic-frame?`, wired to a page checkbox) instead of a fixed t.
   Galactic view ports `kami-solar-helix-scene`'s
   `galactic-frame-position-au` 1:1 (orbital-plane tilt + the Sun's own
-  forward drift). Browser-verified: all 9 bodies render correctly in both
-  view modes at page load and immediately after toggling; sustained
-  multi-second live animation showed intermittent blank-canvas behavior
-  in one sandboxed automation session that root-caused to that session's
-  own repeated WebGPU device/canvas creation (browser/GPU-process
-  flakiness), not the guest or host code — see
-  `test/verify-solar-helix-guest.mjs` and the "Run an example" section
-  below for the full account.
+  forward drift). Verified rendering correctly in both view modes three
+  independent ways: interactive real-browser screenshots (page load and
+  immediately after toggling), a headless real-GPU CI check
+  (`test/render/verify-render-solar-helix.mjs`, exact landmark positions
+  and colors for both a heliocentric and a galactic-frame frame), and a
+  GPU-free numerical sweep of the guest's own math across the entire
+  `now-days` range (`test/verify-solar-helix-guest.mjs`). Sustained
+  multi-second *live* animation showed intermittent blank-canvas behavior
+  in one sandboxed browser-automation session that root-caused to that
+  session's own repeated WebGPU device/canvas creation, not the guest or
+  host code — see the "Run an example" section below for the full
+  account of that investigation.
 - `test/verify-*.mjs` — dependency-free Node smoke tests (same
   `WebAssembly` engine — V8 — a Chromium browser uses) for each example.
   They check the AOT-execution / host-import claims only; they do not
@@ -329,20 +333,29 @@ Investigation before concluding this isn't a code defect:
   calls in prior tabs (which was the first suspect, and did explain some
   — but not all — of the earlier flakiness observed while debugging).
 
-Working conclusion: this is browser/GPU-process-level flakiness under
-sustained WebGPU animation, specific to the sandboxed automation
-environment this investigation ran in (consistent with the DOM/
-customElements gap above, and with this session's own observation that
-isolated re-creation of the same pipeline recovers cleanly) — not a bug
-in `demo_solar_helix.kotoba` or `solar_render_host.cljs`, both of which
-have direct evidence of correctness independent of the live render.
-Confirming this cleanly needs a real, un-sandboxed browser tab left
-running for an extended period, which this session's tooling cannot
-provide (same environmental limit as above). If it reproduces there too,
-the next place to look is WebGPU device/resource lifecycle over a long
-`requestAnimationFrame` run (e.g. whether `queue.submit`'s command
-buffers or bind groups need explicit disposal this code doesn't do) —
-not the position math, which is now regression-tested and ruled out.
+Working conclusion, since strengthened to high confidence by the
+automated-render-verification work below: this was browser/GPU-process-
+level flakiness specific to the sandboxed browser-automation *tool* this
+investigation used (repeated tab creation/navigation and manual
+`requestAdapter`/`requestDevice` probing in the same Chrome instance),
+not a bug in `demo_solar_helix.kotoba` or `solar_render_host.cljs`.
+`test/render/verify-render-solar-helix.mjs` (see "Automated render
+verification" below) drives the exact same compiled host/guest through a
+freshly launched, real-GPU headless Chromium — no manual tab juggling,
+no accumulated device churn — and passes cleanly for a full rendered
+frame in *both* view modes, landmark-for-landmark, color-for-color. That
+test is necessarily a single still frame per run (CI has no "watch it
+animate for 30 seconds" primitive), so it doesn't directly re-run the
+exact sustained-animation scenario above, but combined with the guest-math
+sweep and the isolated-canvas recovery observed during the original
+investigation, there are now three independent lines of evidence the
+code itself is correct and zero evidence pointing at it specifically.
+If a real, un-sandboxed browser left animating for an extended period
+ever reproduces the blank-canvas symptom, the next place to look is
+WebGPU device/resource lifecycle over a long `requestAnimationFrame` run
+(e.g. whether `queue.submit`'s command buffers or bind groups need
+explicit disposal this code doesn't do) — not the position math, which
+is now regression-tested from two independent angles and ruled out.
 
 ## Run the tests
 

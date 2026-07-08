@@ -37,8 +37,23 @@
   const out = document.getElementById('out');
   const canvas = document.getElementById('c');
   const toggle = document.getElementById('galactic-toggle');
+
+  // Test-only determinism hooks (see solar_render_host.cljs's
+  // setup-solar-render-host docstring and test/render/verify-render-
+  // solar-helix.mjs): ?test_fixed_t=<days> pins now-days to an exact
+  // value instead of deriving it from wall-clock time, and
+  // ?test_galactic=1 pre-checks the toggle -- together these make the
+  // render reproducible for CI pixel-comparison instead of depending on
+  // however many milliseconds happen to elapse before a screenshot.
+  const params = new URLSearchParams(location.search);
+  const testFixedT = params.has('test_fixed_t') ? parseFloat(params.get('test_fixed_t')) : null;
+  const testGalactic = params.get('test_galactic') === '1';
+
   try {
     const host = await setupSolarRenderHost(canvas);
+    if (testFixedT !== null) host.setFixedNowDays(testFixedT);
+    if (testGalactic) toggle.checked = true;
+    host.setGalacticFrame(toggle.checked);
     toggle.addEventListener('change', () => host.setGalacticFrame(toggle.checked));
 
     const res = await fetch('./demo_solar_helix.wasm?v=2');

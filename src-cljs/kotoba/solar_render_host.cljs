@@ -200,14 +200,22 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
   "Async, host-side, one-time WebGPU setup (device/context/pipeline/mesh/
   camera) -- call and await BEFORE instantiating the guest wasm module.
   Resolves to a JS object `{imports: (fn [] importsObject), setGalacticFrame:
-  (fn [bool])}` -- `imports()` returns the WebAssembly import object
-  (`now_days`/`galactic_frame` included), `setGalacticFrame` flips the
-  view-toggle state `galactic_frame` reads on its next call (wire it up to
-  a page checkbox's `onchange`). The page owns instantiating the guest
-  module AND the `requestAnimationFrame` loop that calls
-  `instance.exports.main()` again every tick -- this fn only sets up the
-  one-time device/pipeline state and the per-tick host-import closures over
-  it, same division of responsibility Phase 0/1 already established."
+  (fn [bool]), setFixedNowDays: (fn [days-or-null])}` -- `imports()` returns
+  the WebAssembly import object (`now_days`/`galactic_frame` included),
+  `setGalacticFrame` flips the view-toggle state `galactic_frame` reads on
+  its next call (wire it up to a page checkbox's `onchange`).
+  `setFixedNowDays` is a TEST-ONLY escape hatch: passing a number makes
+  `now_days` return exactly that value forever instead of computing it
+  from wall-clock time, making the render fully deterministic (no
+  dependency on real elapsed time between page load and the moment a
+  screenshot is taken) -- see `test/render/verify-render-solar-helix.mjs`,
+  which drives this via `?test_fixed_t=<days>` on the page URL. Passing
+  `nil`/`undefined` reverts to the normal wall-clock-driven behavior. The
+  page owns instantiating the guest module AND the `requestAnimationFrame`
+  loop that calls `instance.exports.main()` again every tick -- this fn
+  only sets up the one-time device/pipeline state and the per-tick
+  host-import closures over it, same division of responsibility Phase 0/1
+  already established."
   [canvas]
   (let [gpu (unchecked-get js/navigator "gpu")]
     (if (nil? gpu)
@@ -312,6 +320,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
                    positions (atom {})
                    galactic-frame? (atom false)
+                   fixed-now-days (atom nil)
                    start-ms (js/performance.now)]
                #js {"imports"
                     (fn []
@@ -320,8 +329,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                                 "sin" (fn [x] (js/Math.sin x))
                                 "now_days"
                                 (fn []
-                                  (let [elapsed-s (/ (- (js/performance.now) start-ms) 1000)]
-                                    (mod (* elapsed-s days-per-second) wrap-days)))
+                                  (if-let [fixed @fixed-now-days]
+                                    fixed
+                                    (let [elapsed-s (/ (- (js/performance.now) start-ms) 1000)]
+                                      (mod (* elapsed-s days-per-second) wrap-days))))
                                 "galactic_frame"
                                 (fn [] (if @galactic-frame? 1 0))
                                 "gpu_set_position"
@@ -363,4 +374,6 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                                     (js-invoke queue "submit" #js [(js-invoke encoder "finish")])
                                     0))}})
                     "setGalacticFrame"
-                    (fn [on] (reset! galactic-frame? (boolean on)))})))))))
+                    (fn [on] (reset! galactic-frame? (boolean on)))
+                    "setFixedNowDays"
+                    (fn [days] (reset! fixed-now-days (when (some? days) (float days))))})))))))
