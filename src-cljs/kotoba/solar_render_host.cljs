@@ -48,6 +48,17 @@
 (def days-per-second 8.0)
 (def wrap-days 80.0)
 
+(defn wrap-now-days
+  "elapsed-s (real wall-clock seconds since the host started) -> the
+  wrapped simulated day count `now_days` returns -- a pure function of
+  the two tuning constants above, pulled out of the `now_days` closure
+  specifically so it's directly unit-testable without a fake clock or a
+  GPU (`elapsed-s * days-per-second` scaled up, then wrapped into
+  [0, wrap-days) via `mod` so the forward-drift term in
+  demo_solar_helix.kotoba's galactic-frame math never grows unbounded)."
+  [elapsed-s]
+  (mod (* elapsed-s days-per-second) wrap-days))
+
 ;; ---------------------------------------------------------------------------
 ;; Body palette — id 0-8 matches kami-solar-helix-scene's `all-body-names`
 ;; order (sun, mercury, venus, earth, mars, jupiter, saturn, uranus,
@@ -331,8 +342,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                                 (fn []
                                   (if-let [fixed @fixed-now-days]
                                     fixed
-                                    (let [elapsed-s (/ (- (js/performance.now) start-ms) 1000)]
-                                      (mod (* elapsed-s days-per-second) wrap-days))))
+                                    (wrap-now-days (/ (- (js/performance.now) start-ms) 1000))))
                                 "galactic_frame"
                                 (fn [] (if @galactic-frame? 1 0))
                                 "gpu_set_position"
