@@ -114,6 +114,25 @@ KotobaWasmElement.define('my-actor-host-demo', {
   (`main()` → 7) and once denying everything (`main()` → 0) — proves the
   check is real per-instantiation policy, not a stub that always answers
   one way.
+- `src/kami-ecs.js` — a browser-side port of `kotoba-lang/kotoba`'s
+  `kotoba.kami-host` (the deterministic game-engine ECS behind the
+  `kami-*` host imports, kotoba-core-contracts `"kami/engine"` id 233,
+  single `(module "kotoba")` ABI — NOT `kami-engine-host.js`'s
+  4-namespace `kami:engine/*` shape): host-owned entity table, fixed-step
+  Euler integration (1/60s), tick counter, input axes, and a SEEDED
+  xorshift64 stream in BigInt 64-bit math, bit-exact with the JVM host —
+  so the same compiled game plays the same run here that kotoba's
+  `kami_game_test.clj` pins on Chicory. Exports `createKamiEcs(seed)` and
+  `kamiHostImports(ecs, memoryBox)`.
+- `examples/kami-survivors/` — `kami-survivors.wasm` (compiled by the real
+  `kotoba wasm emit` from `kotoba-lang/kotoba`'s
+  `src/kami_survivors.kotoba` — **the first game authored directly in a
+  `.kotoba` file**) driven at a fixed step per `requestAnimationFrame`
+  frame, rendered on a canvas, with arrow keys/WASD wired to the
+  host-owned `MoveX`/`MoveY` axes. `test/verify-kami-survivors.mjs` is the
+  parity proof: the same 300-tick run asserts the exact entity counts
+  (`12` at tick 240, `8` after the tick-270 nova burst, `10` at 300,
+  seed 7) kotoba's own JVM/Chicory test pins.
 - `src/actor-host.js` — a browser-side port of `kotoba-lang/kototama`'s
   `kototama.contract` (`actor:host` ABI: `HostCaps`/`RuntimeLimits`/
   `validateImportSurface`, same fail-closed pre-flight + per-call grant
@@ -369,6 +388,7 @@ node test/verify-gcd.mjs
 node test/verify-cap.mjs
 node test/verify-actor-host.mjs
 node test/verify-kami-engine-host.mjs
+node test/verify-kami-survivors.mjs
 node test/verify-gpu-clear-host.mjs
 node test/verify-solar-render-host.mjs
 ```
