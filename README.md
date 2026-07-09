@@ -114,16 +114,23 @@ KotobaWasmElement.define('my-actor-host-demo', {
   (`main()` → 7) and once denying everything (`main()` → 0) — proves the
   check is real per-instantiation policy, not a stub that always answers
   one way.
-- `src/kami-ecs.js` — a browser-side port of `kotoba-lang/kotoba`'s
-  `kotoba.kami-host` (the deterministic game-engine ECS behind the
-  `kami-*` host imports, kotoba-core-contracts `"kami/engine"` id 233,
-  single `(module "kotoba")` ABI — NOT `kami-engine-host.js`'s
-  4-namespace `kami:engine/*` shape): host-owned entity table, fixed-step
-  Euler integration (1/60s), tick counter, input axes, and a SEEDED
-  xorshift64 stream in BigInt 64-bit math, bit-exact with the JVM host —
-  so the same compiled game plays the same run here that kotoba's
-  `kami_game_test.clj` pins on Chicory. Exports `createKamiEcs(seed)` and
-  `kamiHostImports(ecs, memoryBox)`.
+- `src-cljs/kotoba/kami_ecs.cljs` / `src/kami-ecs.js` — the browser/Node
+  host for `kotoba-lang/kotoba`'s `kotoba.kami-host` (the deterministic
+  game-engine ECS behind the `kami-*` host imports, kotoba-core-contracts
+  `"kami/engine"` id 233, single `(module "kotoba")` ABI — NOT
+  `kami-engine-host.js`'s 4-namespace `kami:engine/*` shape). **Authored
+  in ClojureScript** (like `kami-engine-host.js`, unlike this repo's
+  hand-JS modules — it replaced an earlier hand-JS port): the portable
+  `.cljc` ECS itself is `src-cljs/vendor/kotoba/kami_host.cljc`, VENDORED
+  file-for-file from `kotoba-lang/kotoba` (the `src/vendor` ed25519
+  convention; provenance sha in its header) so ONE source serves kotoba's
+  JVM compat suite, its nbb parity script, and this ESM — no drift.
+  Host-owned entity table, fixed-step Euler integration (1/60s), tick
+  counter, input axes, and a seeded 32-bit-pair xorshift64, bit-identical
+  on every runtime — the same compiled game plays the same run here that
+  kotoba's `kami_game_test.clj` pins on Chicory. Exports
+  `createKamiEcs(seed)` and `kamiHostImports(ecs, memoryBox)`; regenerate
+  with `npm run release:kami-ecs` (the compiled output is checked in).
 - `examples/kami-survivors/` — `kami-survivors.wasm` (compiled by the real
   `kotoba wasm emit` from `kotoba-lang/kotoba`'s
   `src/kami_survivors.kotoba` — **the first game authored directly in a
