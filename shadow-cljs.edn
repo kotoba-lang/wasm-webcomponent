@@ -3,10 +3,18 @@
 ;; compiled to a single ES module (`src/kami-engine-host.js`) that runs
 ;; identically in a browser `<script type="module">` and in Node — no
 ;; per-platform hand-written JS ports.
-{:source-paths ["src-cljs"]
+{:source-paths ["src-cljs" "src-cljs/vendor"]
  :dependencies []
  :builds
- {:kami-engine-host
+ {:kami-ecs
+  {:target :esm
+   :output-dir "src"
+   :modules {:kami-ecs
+             {:exports {createKamiEcs kotoba.kami-ecs/create-kami-ecs
+                        kamiHostImports kotoba.kami-ecs/kami-host-imports}}}
+   :release {:compiler-options {:optimizations :advanced}}}
+
+  :kami-engine-host
   {:target :esm
    :output-dir "src"
    :modules {:kami-engine-host
