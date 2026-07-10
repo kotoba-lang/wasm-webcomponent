@@ -9,10 +9,14 @@
 // CDN-servable as raw ES modules (see README).
 //
 // ---------------------------------------------------------------------------
-// Scope (honest R0): 7 of the 9 `actor:host` imports are unconditionally
-// implemented; `llm-infer` is a conditional 8th, wired only when a Node
-// caller injects a synchronous backend (see `llm-infer` below); `http-post`
-// remains the one that's fundamentally unavailable in a browser tab.
+// Scope (honest R2): 7 of the 9 `actor:host` imports are unconditionally
+// synchronous; `llm-infer` is a conditional 8th (`opts.llmInfer` inject);
+// `http-post` is a conditional 9th via one of:
+//   (A) opts.httpPost  — sync inject (Node mock / blocking backend)
+//   (B) opts.httpPostBridge = sabWorker — SharedArrayBuffer + Atomics.wait
+//       (requires crossOriginIsolated / COOP+COEP headers)
+//   (C) JSPI note — WebAssembly Promise Integration is Chrome-flagged;
+//       not wired as default until multi-engine (use inject until then).
 //
 // A WebAssembly host-import function called from a running guest MUST
 // return synchronously -- there is no `await` inside a Wasm call in a
@@ -28,17 +32,13 @@
 // unmodified, audited `@noble/curves` (see `./vendor/README.md` for
 // provenance and why vendored rather than CDN-imported).
 //
-// `http-post` is the one import that's fundamentally unavailable: `fetch` is
-// real network I/O, not arithmetic, so there's no synchronous-without-async
-// version of it to write or vendor -- it needs either JSPI (Chrome 137+
-// only as of this writing, not yet Firefox/Safari) or a
-// SharedArrayBuffer+Atomics.wait blocking bridge (needs COOP/COEP response
-// headers, which this library's "zero-build-step, CDN-servable as raw
-// static files" deployment model doesn't assume). NOT implemented here, on
-// purpose, not silently skipped: `http_post` is simply absent from
-// `actorHostImports`'s returned import object, so a guest declaring it
-// fails to link with a clear Wasm "unknown import" error, not a confusing
-// runtime crash.
+// `http-post` cannot call `fetch` directly inside a sync host import in a
+// standard browser tab. Paths that ARE implemented (see `http_post` wiring
+// below + `http-post-bridge.js`):
+//   - inject: opts.httpPost(url, bodyUint8) => Uint8Array|null  (Node/tests)
+//   - SAB/COOP: opts.httpPostBridge worker (Atomics.wait on SharedArrayBuffer)
+// JSPI (Chrome-only Promise Integration) is documented but not the default
+// wire — guests that request `http_post` without a path still fail to link.
 //
 // Implemented (all genuinely synchronous):
 //   - `clock_monotonic` -- `Date.now()`
@@ -266,7 +266,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   }
 
   const store = opts.store || inMemoryStore();
-  const state = { logReadBytes: 0, logWriteBytes: 0 };
+  const state = { logReadBytes: 0, logWriteBytes: 0, httpPosts: 0 };
   const available = new Set(validation.requested);
 
   const readBytes = (ptr, len) => new Uint8Array(memoryBox.memory.buffer, ptr, len).slice();
@@ -375,5 +375,66 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
     };
   }
 
+  // `(url-ptr url-len body-ptr body-len out-ptr out-cap) -> bytes-written|-1`.
+  // Wired only when a synchronous backend exists (inject or SAB bridge).
+  // Runtime-metered against maxHttpPosts (in-band -1 when exhausted).
+  const httpPostSync =
+    typeof opts.httpPost === 'function'
+      ? opts.httpPost
+      : (opts.httpPostBridge && typeof opts.httpPostBridge.postSync === 'function'
+          ? (url, body) => opts.httpPostBridge.postSync(url, body)
+          : null);
+
+  if (available.has('http-post') && httpPostSync) {
+    fns.http_post = (urlPtr, urlLen, bodyPtr, bodyLen, outPtr, outCap) => {
+      ensureGranted('http-post');
+      if (state.httpPosts >= c.limits.maxHttpPosts) return -1;
+      const url = new TextDecoder().decode(readBytes(urlPtr, urlLen));
+      const body = readBytes(bodyPtr, bodyLen);
+      let resp;
+      try {
+        resp = httpPostSync(url, body);
+      } catch (_) {
+        return -1;
+      }
+      if (resp == null) return -1;
+      const bytes = resp instanceof Uint8Array ? resp : new TextEncoder().encode(String(resp));
+      const n = writeBytes(outPtr, outCap, bytes);
+      if (n >= 0) state.httpPosts += 1;
+      return n;
+    };
+  }
+
   return fns;
+}
+
+/**
+ * Detect which http-post backends are available in this environment.
+ * Pure observation — does not perform network I/O.
+ */
+export function httpPostCapabilities() {
+  const crossOriginIsolated =
+    typeof globalThis.crossOriginIsolated === 'boolean'
+      ? globalThis.crossOriginIsolated
+      : false;
+  const hasSab =
+    typeof SharedArrayBuffer !== 'undefined' &&
+    typeof Atomics !== 'undefined' &&
+    typeof Atomics.wait === 'function';
+  // JSPI: WebAssembly.promising / Suspending — Chrome experimental
+  const hasJspi =
+    typeof WebAssembly !== 'undefined' &&
+    typeof WebAssembly.promising === 'function';
+  return {
+    inject: true, // always available as programming interface
+    sabCoop: Boolean(crossOriginIsolated && hasSab),
+    jspi: hasJspi,
+    crossOriginIsolated,
+    hasSharedArrayBuffer: hasSab,
+    recommended: hasSab && crossOriginIsolated
+      ? 'sab-coop'
+      : hasJspi
+        ? 'jspi-experimental'
+        : 'inject',
+  };
 }

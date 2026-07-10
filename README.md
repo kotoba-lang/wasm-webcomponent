@@ -140,22 +140,13 @@ KotobaWasmElement.define('my-actor-host-demo', {
   parity proof: the same 300-tick run asserts the exact entity counts
   (`12` at tick 240, `8` after the tick-270 nova burst, `10` at 300,
   seed 7) kotoba's own JVM/Chicory test pins.
-- `src/actor-host.js` — a browser-side port of `kotoba-lang/kototama`'s
-  `kototama.contract` (`actor:host` ABI: `HostCaps`/`RuntimeLimits`/
-  `validateImportSurface`, same fail-closed pre-flight + per-call grant
-  checks as `kototama.tender`, the JVM/Chicory counterpart). Implements
-  7 of the 8 `actor:host` imports (`clock-monotonic`/`sha256-hex`/`gen-keypair`/`sign`/
-  `verify`/`log-read`/`log-write`) — only `http-post` is missing (see its
-  header comment for why: `fetch` is real network I/O, not arithmetic, so
-  unlike Ed25519 there's no synchronous-without-async version of it to
-  write or vendor). Includes a hand-rolled, zero-dependency,
-  test-vector-verified synchronous SHA-256 (Web Crypto's
-  `crypto.subtle.digest` is async, unusable inside a synchronous host
-  import) and vendors the real `@noble/curves` ed25519 for `gen-keypair`/
-  `sign`/`verify` (see `src/vendor/README.md` — Ed25519 signing is pure
-  arithmetic, not I/O, so it doesn't need `SubtleCrypto`'s async API, but
-  it's real elliptic-curve math not worth hand-rolling from scratch the
-  way SHA-256 is).
+- `src/actor-host.js` — browser-side port of `kototama.contract` /
+  `kototama.tender` host ABI. Unconditionally sync: clock / sha256 /
+  gen-keypair / sign / verify / log-*. Conditional: `llm-infer`
+  (`opts.llmInfer`), **`http-post`** (`opts.httpPost` inject, or
+  `opts.httpPostBridge` SAB+COOP via `http-post-bridge.js`). JSPI is
+  detected (`httpPostCapabilities`) but not the default wire. See
+  `test/verify-http-post.mjs` + `examples/http-post-echo.wasm`.
 - `src/vendor/` — the actual, unmodified `@noble/curves`/`@noble/hashes`
   source files `actor-host.js`'s ed25519 imports need, copied file-for-file
   (not hand-transcribed) with only bare-specifier import paths patched to
@@ -501,19 +492,15 @@ without a working WebGPU adapter (e.g. local Linux dev machines) — CI itself
 does not set this, so a WebGPU regression on `macos-latest` fails loudly, not
 silently.
 
-## Scope (honest R0)
+## Scope (honest R2 advanced-partial)
 
-- **`kgraph-*`, `has_capability`, and 7 of 8 `actor:host` imports have a
-  browser host-import port.** `kse`/`auth`/`llm`/`evm`/`btc`/`egress`/
-  `chain` (referenced in the wider kotoba/kototama design docs) have none,
-  and neither does `actor:host`'s `http-post` (see `src/actor-host.js`'s
-  header comment — `fetch` is real network I/O, so a synchronous Wasm host
-  import can't perform it without either JS Promise Integration, which
-  isn't broadly shipped across engines yet, or a SharedArrayBuffer+
-  `Atomics.wait` bridge, which needs COOP/COEP response headers this
-  library's plain-static-file deployment model doesn't assume). A module
-  calling any other `(module "kotoba")` import will fail to instantiate
-  against this library today.
+- **`kgraph-*`, `has_capability`, and actor:host** (sync subset + conditional
+  network). **`http-post`** is available via (1) `opts.httpPost` inject
+  (Node/tests), (2) SAB+COOP bridge (`createSabHttpPostBridge`, needs
+  `crossOriginIsolated`), (3) JSPI experimental detection only. Without a
+  path, `http_post` is absent from the import object (clear link error).
+  `llm-infer` remains Node-inject only. Wider `kse`/`auth`/`evm`/… surfaces
+  are not ported.
 - **`has-capability.js` re-states a policy at load time, it doesn't
   re-derive one.** The granted-capabilities list you pass to
   `hasCapabilityHostImport` is trusted input from the page author, not
