@@ -13,11 +13,20 @@
   -- a browser-side port of <code>kotoba-lang/kototama</code>'s
   <code>kototama.contract</code> (HostCaps/RuntimeLimits/
   validate-import-surface, pre-flight AND per-call grant checks, same as
-  the JVM tender). 7 of the 8 <code>actor:host</code> imports are
-  implemented here -- only <code>http-post</code> is missing, since
-  <code>fetch</code> is real network I/O a synchronous host import can't
-  perform without JS Promise Integration (not broadly shipped yet) -- see
-  <code>src/actor-host.js</code>'s header comment for the honest scope note.
+  the JVM tender). This demo element runs on the main/DOM thread (like
+  <code>KotobaWasmElement</code> always has), so it only wires the 7
+  imports that can run there. <code>http-post</code> now has a real
+  implementation too -- <code>createHttpPostBridge</code>, a
+  SharedArrayBuffer+Atomics.wait blocking bridge to a companion Worker that
+  does the actual <code>fetch</code> -- but it requires the guest itself to
+  be instantiated inside a Worker (browsers disallow
+  <code>Atomics.wait</code> on the main thread) plus a
+  cross-origin-isolated page (COOP/COEP headers), neither of which this
+  main-thread demo element provides. See <code>src/actor-host.js</code>'s
+  header comment and <code>test/verify-http-post-bridge.mjs</code> for the
+  bridge itself verified end-to-end; wiring a Worker-hosted
+  <code>KotobaWasmElement</code> variant that can actually use it from a
+  page is a follow-up, not done here.
 </p>
 <actor-host-wasm-demo src="./actor-host-demo.wasm"></actor-host-wasm-demo>
 <script type="module">

@@ -9,10 +9,12 @@
 // CDN-servable as raw ES modules (see README).
 //
 // ---------------------------------------------------------------------------
-// Scope (honest R0): 7 of the 9 `actor:host` imports are unconditionally
-// implemented; `llm-infer` is a conditional 8th, wired only when a Node
-// caller injects a synchronous backend (see `llm-infer` below); `http-post`
-// remains the one that's fundamentally unavailable in a browser tab.
+// Scope (honest R1): 7 of the 9 `actor:host` imports are unconditionally
+// implemented; `llm-infer` and `http-post` are both conditional -- wired
+// only when a caller injects a real backend (see each below), same
+// "declared but only linked when a real implementation exists" pattern for
+// both, just via different mechanisms (Node-side sync fn for `llm-infer`,
+// a Worker+SharedArrayBuffer bridge for `http-post`).
 //
 // A WebAssembly host-import function called from a running guest MUST
 // return synchronously -- there is no `await` inside a Wasm call in a
@@ -28,17 +30,24 @@
 // unmodified, audited `@noble/curves` (see `./vendor/README.md` for
 // provenance and why vendored rather than CDN-imported).
 //
-// `http-post` is the one import that's fundamentally unavailable: `fetch` is
-// real network I/O, not arithmetic, so there's no synchronous-without-async
-// version of it to write or vendor -- it needs either JSPI (Chrome 137+
-// only as of this writing, not yet Firefox/Safari) or a
-// SharedArrayBuffer+Atomics.wait blocking bridge (needs COOP/COEP response
-// headers, which this library's "zero-build-step, CDN-servable as raw
-// static files" deployment model doesn't assume). NOT implemented here, on
-// purpose, not silently skipped: `http_post` is simply absent from
-// `actorHostImports`'s returned import object, so a guest declaring it
-// fails to link with a clear Wasm "unknown import" error, not a confusing
-// runtime crash.
+// `http-post` is the one import that needs real (not merely deferrable)
+// async I/O: `fetch` can't be rewritten as arithmetic the way Ed25519 was.
+// Two bridges exist in principle -- JSPI (Chrome 137+ only as of this
+// writing, not yet Firefox/Safari) or a SharedArrayBuffer+Atomics.wait
+// blocking bridge -- `createHttpPostBridge` below implements the latter.
+// It needs `self.crossOriginIsolated` (COOP: same-origin + COEP:
+// require-corp response headers, a deployment prerequisite this
+// zero-build-step library can't assume by default) AND must run on a
+// Worker thread, not the main/DOM thread -- browsers throw a TypeError if
+// `Atomics.wait` is called from the main thread (it would freeze
+// rendering), so the guest itself must be instantiated inside a Worker
+// whenever it needs `http-post`; `KotobaWasmElement`'s current
+// main-thread `connectedCallback` cannot host it directly (see
+// `examples/actor-host/`'s doc comment for a worker-hosted usage sketch).
+// When `opts.httpPostBridge` isn't supplied, `http_post` stays absent from
+// `actorHostImports`'s returned import object exactly as before, so a
+// guest declaring it fails to link with a clear Wasm "unknown import"
+// error, not a confusing runtime crash.
 //
 // Implemented (all genuinely synchronous):
 //   - `clock_monotonic` -- `Date.now()`
@@ -241,6 +250,68 @@ export function inMemoryStore() {
 }
 
 // ---------------------------------------------------------------------------
+// http-post: SharedArrayBuffer + Atomics.wait blocking bridge to a
+// companion Worker (./http-post-worker.js) that performs the real `fetch`.
+// MUST be constructed from inside a Worker (see the scope note above for
+// why) -- throws immediately, before touching SharedArrayBuffer/Worker at
+// all, if called where `window` is defined.
+//
+// Wire protocol with http-post-worker.js: one `control` SharedArrayBuffer
+// (3 Int32 cells: done-flag/http-status/response-length) the caller blocks
+// on via `Atomics.wait(control, 0, 0)`, and one fixed-capacity `response`
+// SharedArrayBuffer the worker writes response bytes into before flipping
+// the done-flag and calling `Atomics.notify`. Both are handed to the
+// worker once, up front, via an `{kind: 'init'}` message (SharedArrayBuffers
+// are natively shareable across `postMessage`, no Transferable needed);
+// each `post()` call then just posts `{kind: 'post', url, body}` and blocks.
+export function createHttpPostBridge(opts = {}) {
+  if (typeof window !== 'undefined') {
+    throw new Error(
+      'kototama actor-host: createHttpPostBridge must run inside a Worker -- ' +
+        'Atomics.wait is disallowed on the main/DOM thread (it would freeze ' +
+        'rendering), so the guest itself must be instantiated in a Worker ' +
+        'whenever it requests http-post.'
+    );
+  }
+  if (typeof SharedArrayBuffer === 'undefined' || globalThis.crossOriginIsolated === false) {
+    throw new Error(
+      'kototama actor-host: http-post bridge requires SharedArrayBuffer, which ' +
+        'requires the page to be cross-origin-isolated (COOP: same-origin + ' +
+        'COEP: require-corp response headers).'
+    );
+  }
+  const capacity = opts.maxResponseBytes || 65536;
+  const controlSab = new SharedArrayBuffer(3 * 4);
+  const control = new Int32Array(controlSab);
+  const responseSab = new SharedArrayBuffer(capacity);
+  const response = new Uint8Array(responseSab);
+  const workerUrl = opts.workerUrl || new URL('./http-post-worker.js', import.meta.url);
+  const worker = opts.makeWorker
+    ? opts.makeWorker(workerUrl)
+    : new Worker(workerUrl, { type: 'module' });
+  worker.postMessage({ kind: 'init', control: controlSab, response: responseSab });
+
+  return {
+    // (url: string, body: Uint8Array) -> { status: number, body: Uint8Array }
+    // status is the real HTTP status on success, -1 on timeout/network
+    // error/fetch rejection (same fail-closed convention as everything else
+    // in this module).
+    post(url, body) {
+      Atomics.store(control, 0, 0);
+      worker.postMessage({ kind: 'post', url, body });
+      const waitResult = Atomics.wait(control, 0, 0, opts.timeoutMs ?? 30000);
+      if (waitResult === 'timed-out') return { status: -1, body: new Uint8Array(0) };
+      const status = Atomics.load(control, 1);
+      const length = Atomics.load(control, 2);
+      return { status, body: response.slice(0, length) };
+    },
+    terminate() {
+      worker.terminate();
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The (module "kotoba") host imports, wired exactly like kgraph.js's
 // kgraphHostImports: `memoryBox` is a mutable `{memory}` holder populated
 // with `instance.exports.memory` AFTER `WebAssembly.instantiate` resolves.
@@ -266,7 +337,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   }
 
   const store = opts.store || inMemoryStore();
-  const state = { logReadBytes: 0, logWriteBytes: 0 };
+  const state = { logReadBytes: 0, logWriteBytes: 0, httpPosts: 0 };
   const available = new Set(validation.requested);
 
   const readBytes = (ptr, len) => new Uint8Array(memoryBox.memory.buffer, ptr, len).slice();
@@ -351,6 +422,32 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       state.logWriteBytes += bytes.length;
       store.append(bytes);
       return 0;
+    };
+  }
+
+  // `(url-ptr url-len body-ptr body-len out-ptr out-cap) -> bytes-written|-1`.
+  // Only wired when a caller supplies `opts.httpPostBridge` (a
+  // `createHttpPostBridge()` instance -- see above; requires this guest to
+  // be running inside a Worker). Metered against `:max-http-posts` via
+  // `state.httpPosts`, same per-call runtime counter shape
+  // `kototama.tender`'s `http-post-host-fn` uses (distinct from
+  // `validateImportSurface`'s static declaration-count check above) --
+  // exceeding it is an in-band `-1`, not a thrown error, matching every
+  // other quota (`log-read`/`log-write`) in this file. A non-2xx HTTP
+  // response still writes its body and returns the byte count (mirroring
+  // `http-post-host-fn`, which doesn't inspect status either) -- only a
+  // bridge-reported `status < 0` (network error, timeout) or an oversized
+  // response (`writeBytes`'s own `-1` truncation) fails closed.
+  if (available.has('http-post') && opts.httpPostBridge) {
+    fns.http_post = (urlPtr, urlLen, bodyPtr, bodyLen, outPtr, outCap) => {
+      ensureGranted('http-post');
+      if (state.httpPosts + 1 > c.limits.maxHttpPosts) return -1;
+      state.httpPosts += 1;
+      const url = new TextDecoder().decode(readBytes(urlPtr, urlLen));
+      const body = readBytes(bodyPtr, bodyLen);
+      const { status, body: respBody } = opts.httpPostBridge.post(url, body);
+      if (status < 0) return -1;
+      return writeBytes(outPtr, outCap, respBody);
     };
   }
 
