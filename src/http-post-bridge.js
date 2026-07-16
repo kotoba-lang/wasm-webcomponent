@@ -63,7 +63,11 @@ export function createSabHttpPostBridge(opts = {}) {
           try {
             const urlLen = Atomics.load(ctrl, 2);
             const bodyLen = Atomics.load(ctrl, 3);
-            const url = new TextDecoder().decode(payload.subarray(0, urlLen));
+            // .slice (not .subarray) -- TextDecoder.decode() throws
+            // "The provided ArrayBufferView value must not be shared" on a
+            // view backed directly by a SharedArrayBuffer (confirmed live);
+            // .slice() copies into a fresh, non-shared ArrayBuffer first.
+            const url = new TextDecoder().decode(payload.slice(0, urlLen));
             const body = payload.slice(urlLen, urlLen + bodyLen);
             const resp = await fetch(url, {
               method: 'POST',
