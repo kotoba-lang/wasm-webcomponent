@@ -59,6 +59,25 @@ export class KotobaWasmWorkerElement extends HTMLElement {
 
     const src = this.getAttribute('src');
     const exportName = this.exportName;
+    // `grants="http-post,llm-infer"` (comma-separated); defaults to
+    // http-post only, matching kotoba-wasm-worker-host.js's own fallback.
+    const grantsAttr = this.getAttribute('grants');
+    const grants = grantsAttr
+      ? grantsAttr.split(',').map((g) => g.trim()).filter(Boolean)
+      : undefined;
+    const maxHttpPosts = this.getAttribute('max-http-posts');
+    const maxLlmInfers = this.getAttribute('max-llm-infers');
+    const limits =
+      maxHttpPosts != null || maxLlmInfers != null
+        ? {
+            maxHttpPosts: maxHttpPosts != null ? Number(maxHttpPosts) : 8,
+            maxLlmInfers: maxLlmInfers != null ? Number(maxLlmInfers) : 0,
+          }
+        : undefined;
+    // Developer-controlled proxy endpoint for llm-infer -- see
+    // kotoba-wasm-worker-host.js's namespace comment for why this must
+    // never be a real LLM provider URL called directly from the browser.
+    const llmInferUrl = this.getAttribute('llm-infer-url') || undefined;
     let worker;
 
     try {
@@ -76,7 +95,7 @@ export class KotobaWasmWorkerElement extends HTMLElement {
           else reject(new Error(event.data.error));
         };
         worker.onerror = (event) => reject(new Error(event.message));
-        worker.postMessage({ kind: 'run', src: resolvedSrc, exportName });
+        worker.postMessage({ kind: 'run', src: resolvedSrc, exportName, grants, limits, llmInferUrl });
       });
 
       this.render(pre, { src, exportName, result });

@@ -7,11 +7,21 @@
 // `connectedCallback`.
 //
 // Message protocol with the main thread (`kotoba-wasm-worker-element.js`):
-//   in:  {kind: 'run', src, exportName, grants, limits}
+//   in:  {kind: 'run', src, exportName, grants, limits, llmInferUrl}
 //   out: {ok: true, result: <string>} | {ok: false, error: <string>}
 // `result` is stringified (not sent as a raw BigInt) for the widest
 // structured-clone compatibility across engines -- every current export in
 // this ABI returns `i64`, always representable as a decimal string.
+//
+// `llm-infer` reuses this SAME SAB+Atomics bridge instance as `http-post` --
+// both are "a synchronous host-import needs to trigger real async network
+// I/O", solved identically. `llmInferUrl` is a caller-supplied endpoint that
+// `llm_infer` POSTs the raw prompt bytes to and reads the raw completion
+// text back from -- a developer-controlled proxy that itself holds any real
+// LLM API key server-side. NEVER embed a real LLM provider API key in
+// browser-shipped JS/HTML calling the provider directly; that's the whole
+// reason this is a caller-supplied URL instead of a built-in Anthropic call
+// like `kototama.tender`'s (JVM-only, server-side) `anthropic-infer`.
 import { actorHostImports, hostCaps } from './actor-host.js';
 import { createSabHttpPostBridge } from './http-post-bridge.js';
 
@@ -29,7 +39,11 @@ self.onmessage = async (event) => {
     const memoryBox = {};
     const caps = hostCaps({ grants, limits });
     const importObject = {
-      kotoba: actorHostImports(grants, caps, memoryBox, { httpPostBridge: bridge }),
+      kotoba: actorHostImports(grants, caps, memoryBox, {
+        httpPostBridge: bridge,
+        llmInferBridge: bridge,
+        llmInferUrl: msg.llmInferUrl,
+      }),
     };
     const response = await fetch(msg.src);
     const { instance } = await WebAssembly.instantiateStreaming(response, importObject);

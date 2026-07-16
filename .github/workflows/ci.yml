@@ -66,6 +66,28 @@ jobs:
           echo "$PWD/wasm-tools-1.253.0-x86_64-linux" >> "$GITHUB_PATH"
       - run: npm run test:http-post-browser
 
+  llm-infer-browser-verify:
+    # Real-browser (headless Chromium) end-to-end verification that
+    # `llm-infer` works via the SAME SharedArrayBuffer+Atomics.wait bridge
+    # http-post-browser-verify above already proves out --
+    # kotoba-wasm-worker-host.js passes one bridge instance as both
+    # httpPostBridge and llmInferBridge (test/browser/verify_llm_infer_browser.cljs).
+    # The local server here stands in for a developer-controlled LLM proxy,
+    # never a real provider called directly with a key embedded in the page.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Install wasm-tools
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasm-tools/releases/download/v1.253.0/wasm-tools-1.253.0-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/wasm-tools-1.253.0-x86_64-linux" >> "$GITHUB_PATH"
+      - run: npm run test:llm-infer-browser
+
   render-verify:
     # Real-pixel WebGPU render verification (test/render/verify-render-*.mjs)
     # -- actually drives a headless browser and asserts on decoded canvas
