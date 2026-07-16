@@ -26,8 +26,10 @@ const DEFAULT_PAYLOAD_BYTES = 256 * 1024;
  * @param {object} [opts]
  * @param {number} [opts.payloadBytes]
  * @param {number} [opts.timeoutMs]
+ * @param {number} [opts.readyTimeoutMs]
+ * @returns {Promise<object>}
  */
-export function createSabHttpPostBridge(opts = {}) {
+export async function createSabHttpPostBridge(opts = {}) {
   if (typeof SharedArrayBuffer === 'undefined' || typeof Atomics === 'undefined') {
     throw new Error('http-post-bridge: SharedArrayBuffer/Atomics unavailable');
   }
@@ -53,6 +55,10 @@ export function createSabHttpPostBridge(opts = {}) {
     self.onmessage = (ev) => {
       const ctrl = new Int32Array(ev.data.ctrlSab);
       const payload = new Uint8Array(ev.data.payloadSab);
+      // Signal readiness only once this handler is about to commit to the
+      // wait loop below -- the caller blocks its own first postSync() on
+      // this message instead of guessing a fixed delay.
+      self.postMessage({ kind: 'ready' });
       (async function loop() {
         for (;;) {
           let s = Atomics.load(ctrl, 0);
@@ -93,7 +99,25 @@ export function createSabHttpPostBridge(opts = {}) {
   const blob = new Blob([workerSource], { type: 'application/javascript' });
   const url = URL.createObjectURL(blob);
   const worker = new Worker(url);
-  worker.postMessage({ ctrlSab, payloadSab });
+
+  const readyTimeoutMs = opts.readyTimeoutMs || 5000;
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('http-post-bridge: inner worker did not signal ready in time'));
+    }, readyTimeoutMs);
+    worker.onmessage = (ev) => {
+      if (ev.data && ev.data.kind === 'ready') {
+        clearTimeout(timer);
+        worker.onmessage = null;
+        resolve();
+      }
+    };
+    worker.onerror = (ev) => {
+      clearTimeout(timer);
+      reject(new Error(`http-post-bridge: inner worker failed to start: ${ev.message}`));
+    };
+    worker.postMessage({ ctrlSab, payloadSab });
+  });
 
   function postSync(urlStr, body) {
     const urlBytes = new TextEncoder().encode(String(urlStr));

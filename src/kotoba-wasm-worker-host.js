@@ -22,18 +22,10 @@ self.onmessage = async (event) => {
   const limits = msg.limits || { maxHttpPosts: 8 };
   let bridge;
   try {
-    bridge = createSabHttpPostBridge();
-    // `createSabHttpPostBridge` spawns its own inner Worker and returns
-    // before that Worker has actually started running (Worker
-    // instantiation is inherently async) -- calling `postSync` before the
-    // inner Worker's `onmessage`/`Atomics.wait` loop has registered is a
-    // real, confirmed-live deadlock (the inner Worker's spawn+message
-    // delivery never got a turn to complete because this thread blocks on
-    // `Atomics.wait` first). A short yield here is a pragmatic margin,
-    // empirically sufficient in this environment; the correct long-term
-    // fix is an explicit ready handshake inside `createSabHttpPostBridge`
-    // itself, out of scope for this change.
-    await new Promise((r) => setTimeout(r, 200));
+    // `createSabHttpPostBridge` now awaits a real ready handshake from its
+    // inner Worker before resolving, so the first `postSync` call below is
+    // never racing the inner Worker's startup.
+    bridge = await createSabHttpPostBridge();
     const memoryBox = {};
     const caps = hostCaps({ grants, limits });
     const importObject = {
