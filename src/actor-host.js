@@ -10,11 +10,17 @@
 //
 // ---------------------------------------------------------------------------
 // Scope (honest R2): 7 of the 9 `actor:host` imports are unconditionally
-// synchronous; `llm-infer` is a conditional 8th (`opts.llmInfer` inject);
-// `http-post` is a conditional 9th via one of:
-//   (A) opts.httpPost  — sync inject (Node mock / blocking backend)
-//   (B) opts.httpPostBridge = sabWorker — SharedArrayBuffer + Atomics.wait
-//       (requires crossOriginIsolated / COOP+COEP headers)
+// synchronous; `llm-infer` and `http-post` are each conditional, wired via
+// one of:
+//   (A) opts.httpPost / opts.llmInfer — sync inject (Node mock / blocking backend)
+//   (B) opts.httpPostBridge / opts.llmInferBridge+llmInferUrl —
+//       SharedArrayBuffer + Atomics.wait (requires crossOriginIsolated /
+//       COOP+COEP headers). `llm-infer`'s bridge path reuses the identical
+//       bridge shape `http-post` uses (often the SAME bridge instance) --
+//       both are "sync host-import needs real async network I/O", solved
+//       once. `llmInferUrl` must point at a developer-controlled proxy, NOT
+//       a real LLM provider directly -- a browser tab can never hold a
+//       provider API key without shipping it to every visitor.
 //   (C) JSPI note — WebAssembly Promise Integration is Chrome-flagged;
 //       not wired as default until multi-engine (use inject until then).
 //
@@ -294,7 +300,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   }
 
   const store = opts.store || inMemoryStore();
-  const state = { logReadBytes: 0, logWriteBytes: 0, httpPosts: 0 };
+  const state = { logReadBytes: 0, logWriteBytes: 0, httpPosts: 0, llmInfers: 0 };
   const available = new Set(validation.requested);
 
   const readBytes = (ptr, len) => new Uint8Array(memoryBox.memory.buffer, ptr, len).slice();
@@ -382,24 +388,59 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
     };
   }
 
-  // `(prompt-ptr prompt-len out-ptr out-cap) -> bytes-written|-1`. Only
-  // wired when a caller supplies `opts.llmInfer` (a synchronous
-  // `(promptString) => string|null` function) -- e.g. this repo's own
-  // Node-hosted verify scripts backing it with a blocking child_process
-  // call to `curl`. Never call `opts.llmInfer` from actual browser code: a
-  // synchronous XHR-style blocking call is deprecated/discouraged
-  // platform-wide there, unlike a Node `child_process` call, which has no
-  // such constraint. `text === null` (no API key configured on the host,
-  // the call failed, or an empty/malformed reply) fails closed as -1, same
-  // as `kototama.tender`'s `llm-infer-host-fn` never distinguishing "no
-  // credential" from "call failed" in-band.
-  if (available.has('llm-infer') && typeof opts.llmInfer === 'function') {
+  // `(prompt-ptr prompt-len out-ptr out-cap) -> bytes-written|-1`. Wired
+  // whenever a synchronous backend exists -- either:
+  //   - inject: `opts.llmInfer` (a synchronous `(promptString) =>
+  //     string|null` function), e.g. this repo's own Node-hosted verify
+  //     scripts backing it with a blocking child_process call. Never call
+  //     `opts.llmInfer` from actual browser code: a synchronous XHR-style
+  //     blocking call is deprecated/discouraged platform-wide there, unlike
+  //     a Node `child_process` call, which has no such constraint.
+  //   - SAB/COOP bridge: `opts.llmInferBridge` (the SAME bridge shape
+  //     `http-post` uses, typically the identical bridge instance) plus
+  //     `opts.llmInferUrl`, a developer-controlled endpoint `llm_infer`
+  //     POSTs the raw prompt bytes to and reads the raw completion text
+  //     back from. This is deliberately NOT a built-in call to any real LLM
+  //     provider (unlike `kototama.tender`'s JVM-only, server-side
+  //     `anthropic-infer`) -- a browser tab can never hold a real provider
+  //     API key without shipping it to every visitor, so the provider call
+  //     itself must live behind `llmInferUrl`, on a host the caller
+  //     controls.
+  // Runtime-metered against maxLlmInfers (in-band -1 when exhausted), same
+  // convention http_post's maxHttpPosts already uses. `text === null` (no
+  // backend configured, the call failed, or an empty/malformed reply) fails
+  // closed as -1, same as `kototama.tender`'s `llm-infer-host-fn` never
+  // distinguishing "no credential" from "call failed" in-band.
+  const llmInferSync =
+    typeof opts.llmInfer === 'function'
+      ? opts.llmInfer
+      : (opts.llmInferBridge &&
+          typeof opts.llmInferBridge.postSync === 'function' &&
+          typeof opts.llmInferUrl === 'string'
+          ? (promptString) => {
+              const resp = opts.llmInferBridge.postSync(
+                opts.llmInferUrl,
+                new TextEncoder().encode(promptString),
+              );
+              return resp == null ? null : new TextDecoder().decode(resp);
+            }
+          : null);
+
+  if (available.has('llm-infer') && llmInferSync) {
     fns.llm_infer = (promptPtr, promptLen, outPtr, outCap) => {
       ensureGranted('llm-infer');
+      if (state.llmInfers >= c.limits.maxLlmInfers) return -1;
       const prompt = new TextDecoder().decode(readBytes(promptPtr, promptLen));
-      const text = opts.llmInfer(prompt);
+      let text;
+      try {
+        text = llmInferSync(prompt);
+      } catch (_) {
+        return -1;
+      }
       if (text == null) return -1;
-      return writeBytes(outPtr, outCap, new TextEncoder().encode(text));
+      const n = writeBytes(outPtr, outCap, new TextEncoder().encode(text));
+      if (n >= 0) state.llmInfers += 1;
+      return n;
     };
   }
 

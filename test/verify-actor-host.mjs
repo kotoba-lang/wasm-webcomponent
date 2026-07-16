@@ -256,5 +256,56 @@ check(preflightThrew, 'actorHostImports throws pre-flight when the surface is re
   check(failResult === -1, `a null opts.llmInfer reply fails closed as -1 (got ${failResult})`);
 }
 
+// ── llm-infer: per-call metering against maxLlmInfers, the same in-band -1
+// convention http_post's maxHttpPosts already uses (previously unenforced
+// here -- only the pre-flight import-declaration count was checked, which
+// is always <=1 per guest and never actually limits repeated calls) ───────
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const fns = actorHostImports(
+    ['llm-infer'],
+    hostCaps({ grants: ['llm-infer'], limits: { maxLlmInfers: 1 } }),
+    memoryBox,
+    { llmInfer: () => 'ok' },
+  );
+  const promptBytes = new TextEncoder().encode('hi');
+  new Uint8Array(memoryBox.memory.buffer, 0, promptBytes.length).set(promptBytes);
+  const first = fns.llm_infer(0, promptBytes.length, 100, 64);
+  const second = fns.llm_infer(0, promptBytes.length, 100, 64);
+  check(first > 0, `first llm_infer call ok (${first})`);
+  check(second === -1, `second llm_infer call metered -1 once maxLlmInfers is exhausted (got ${second})`);
+}
+
+// ── llm-infer: SAB-bridge path (opts.llmInferBridge + opts.llmInferUrl) --
+// the SAME bridge shape http_post uses (a mock postSync here stands in for
+// the real createSabHttpPostBridge instance kotoba-wasm-worker-host.js
+// passes for BOTH capabilities; the real browser round-trip is covered by
+// test/browser/verify_llm_infer_browser.cljs) ──────────────────────────────
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const calls = [];
+  const bridge = {
+    postSync: (url, body) => {
+      calls.push({ url, body: new TextDecoder().decode(body) });
+      return new TextEncoder().encode(`proxied:${new TextDecoder().decode(body)}`);
+    },
+  };
+  const fns = actorHostImports(
+    ['llm-infer'],
+    hostCaps({ grants: ['llm-infer'], limits: { maxLlmInfers: 1 } }),
+    memoryBox,
+    { llmInferBridge: bridge, llmInferUrl: 'http://proxy.example.test/infer' },
+  );
+  check(typeof fns.llm_infer === 'function', 'fns.llm_infer wired via llmInferBridge+llmInferUrl');
+  const promptBytes = new TextEncoder().encode('hi');
+  new Uint8Array(memoryBox.memory.buffer, 0, promptBytes.length).set(promptBytes);
+  const written = fns.llm_infer(0, promptBytes.length, 100, 64);
+  const reply = new TextDecoder('utf-8').decode(new Uint8Array(memoryBox.memory.buffer, 100, written));
+  check(calls.length === 1 && calls[0].url === 'http://proxy.example.test/infer',
+    `llm_infer POSTs to opts.llmInferUrl via the bridge (got ${JSON.stringify(calls)})`);
+  check(calls[0].body === 'hi', `the bridge receives the raw decoded prompt as the POST body (got ${JSON.stringify(calls[0]?.body)})`);
+  check(reply === 'proxied:hi', `the bridge's reply is written back into guest memory (got ${JSON.stringify(reply)})`);
+}
+
 if (failed) process.exit(1);
 console.log('OK: actor-host.js round-trips through a real native-WebAssembly-hosted module');
