@@ -16,6 +16,7 @@
     "compile:solar-render-host": "shadow-cljs compile solar-render-host",
     "release:solar-render-host": "shadow-cljs release solar-render-host",
     "test": "for f in test/verify-*.mjs; do node \"$f\" || exit 1; done",
-    "test:render": "for f in test/render/verify-*.mjs; do node \"$f\" || exit 1; done"
+    "test:render": "for f in test/render/verify-*.mjs; do node \"$f\" || exit 1; done",
+    "test:browser": "npx nbb -cp test/browser test/browser/verify_actor_host_browser.cljs"
   }
 }

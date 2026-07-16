@@ -21,6 +21,26 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  actor-host-browser-verify:
+    # Real-browser (headless Chromium) DOM/custom-element E2E for
+    # actor-host.js + KotobaWasmElement (test/browser/verify_actor_host_browser.cljs,
+    # run via nbb per CLAUDE.md's "new Node-side test harnesses are nbb, not
+    # .mjs/.cjs" rule). test/verify-actor-host.mjs already covers the same
+    # host-fn logic via Node's own WebAssembly.instantiate directly; this is
+    # the customElements/shadow-DOM/`<script type="module">` layer that
+    # never had coverage before (no ADR/ubuntu-latest constraint like
+    # render-verify's WebGPU job -- no GPU involved here, plain WASM +
+    # crypto + DOM).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+
   render-verify:
     # Real-pixel WebGPU render verification (test/render/verify-render-*.mjs)
     # -- actually drives a headless browser and asserts on decoded canvas
