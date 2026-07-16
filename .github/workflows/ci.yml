@@ -41,6 +41,31 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
 
+  http-post-browser-verify:
+    # Real-browser (headless Chromium) end-to-end verification that
+    # `http-post` actually completes a real HTTP POST round-trip through
+    # `createSabHttpPostBridge` (src/http-post-bridge.js) from inside a real
+    # Worker-hosted WASM guest, on a page served with real COOP/COEP headers
+    # (test/browser/verify_http_post_browser.cljs). Distinct from
+    # actor-host-browser-verify above: that job covers the 7 imports that
+    # run on the main thread; this one is specifically the Worker+SAB+Atomics
+    # bridge path, which needed its own guest fixture (compiled at test time
+    # via `wasm-tools`, since the target URL's port isn't known until the
+    # test's local echo server is listening).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Install wasm-tools
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasm-tools/releases/download/v1.253.0/wasm-tools-1.253.0-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/wasm-tools-1.253.0-x86_64-linux" >> "$GITHUB_PATH"
+      - run: npm run test:http-post-browser
+
   render-verify:
     # Real-pixel WebGPU render verification (test/render/verify-render-*.mjs)
     # -- actually drives a headless browser and asserts on decoded canvas

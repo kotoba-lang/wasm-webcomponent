@@ -23,34 +23,54 @@
    ".wasm" "application/wasm"
    ".json" "application/json"})
 
+(def coop-coep-headers
+  "Response headers a page needs for `self.crossOriginIsolated` to be true
+  (SharedArrayBuffer availability) -- same values `http-post-bridge.js`
+  exports as `COOP_COEP_HEADERS`, duplicated here rather than imported so
+  this nbb-side test harness has no dependency on that browser-side ES
+  module (which itself isn't meant to run under nbb/Node)."
+  {"Cross-Origin-Opener-Policy" "same-origin"
+   "Cross-Origin-Embedder-Policy" "require-corp"})
+
 (defn start-static-server
   "Serve `root-dir` over plain HTTP on an OS-assigned localhost port (no
   external dependency -- Node's own `http` module). Returns a Promise of
-  `{:baseUrl :close}`."
-  [root-dir]
-  (js/Promise.
-   (fn [resolve reject]
-     (let [server
-           (http/createServer
-            (fn [req res]
-              (-> (let [url-path (js/decodeURIComponent (first (.split (.-url req) "?")))
-                        file-path (.join path root-dir url-path)]
-                    (if-not (.startsWith file-path root-dir)
-                      (do (.writeHead res 403) (.end res "forbidden") (js/Promise.resolve nil))
-                      (-> (readFile file-path)
-                          (.then (fn [data]
-                                   (let [ext (.extname path file-path)]
-                                     (.writeHead res 200 #js {"Content-Type" (get mime-types ext "application/octet-stream")})
-                                     (.end res data)))))))
-                  (.catch (fn [e]
-                            (.writeHead res 404)
-                            (.end res (str "not found: " (.-message e))))))))]
-       (.on server "error" reject)
-       (.listen server 0 "127.0.0.1"
-                (fn []
-                  (let [port (.-port (.address server))]
-                    (resolve #js {:baseUrl (str "http://127.0.0.1:" port)
-                                  :close (fn [] (js/Promise. (fn [r] (.close server r))))}))))))))
+  `{:baseUrl :close}`.
+
+  `opts` (optional, second arg): `{:cross-origin-isolated? true}` adds
+  COOP/COEP response headers to every response, making `self.
+  crossOriginIsolated` true on the page and enabling `SharedArrayBuffer` --
+  needed for `verify_http_post_browser.cljs`'s SAB+Atomics bridge, not for
+  the existing `verify_actor_host_browser.cljs` (default false, so that
+  test's server behavior is unchanged)."
+  ([root-dir] (start-static-server root-dir {}))
+  ([root-dir opts]
+   (let [extra-headers (if (:cross-origin-isolated? opts) coop-coep-headers {})]
+     (js/Promise.
+      (fn [resolve reject]
+        (let [server
+              (http/createServer
+               (fn [req res]
+                 (-> (let [url-path (js/decodeURIComponent (first (.split (.-url req) "?")))
+                           file-path (.join path root-dir url-path)]
+                       (if-not (.startsWith file-path root-dir)
+                         (do (.writeHead res 403) (.end res "forbidden") (js/Promise.resolve nil))
+                         (-> (readFile file-path)
+                             (.then (fn [data]
+                                      (let [ext (.extname path file-path)
+                                            headers (merge {"Content-Type" (get mime-types ext "application/octet-stream")}
+                                                            extra-headers)]
+                                        (.writeHead res 200 (clj->js headers))
+                                        (.end res data)))))))
+                     (.catch (fn [e]
+                               (.writeHead res 404)
+                               (.end res (str "not found: " (.-message e))))))))]
+          (.on server "error" reject)
+          (.listen server 0 "127.0.0.1"
+                   (fn []
+                     (let [port (.-port (.address server))]
+                       (resolve #js {:baseUrl (str "http://127.0.0.1:" port)
+                                     :close (fn [] (js/Promise. (fn [r] (.close server r))))}))))))))))
 
 (defn with-headless-browser
   "Launch headless Chromium, run `(f browser)`, always close the browser
@@ -73,20 +93,30 @@
   `JSON.stringify`, so it's safely quoted) rather than passed as a
   separate Playwright `arg` -- Playwright only applies `arg` when
   `pageFunction` is a real Function value, not when it's a source string,
-  so a string `pageFunction` given an `arg` silently ignores it. The
-  `.evaluate` call is also an explicit IIFE (`(() => ...)()`), not a bare
-  arrow-function string: passed as-is, `page.evaluate` treats a string as
-  an *expression* to evaluate, and a bare `\"() => ...\"` expression
-  evaluates to an (unserializable, silently-dropped-to-undefined) function
-  VALUE rather than being called -- confirmed by a real crash this caused
-  (`.includes` called on the resulting `undefined`)."
+  so a string `pageFunction` given an `arg` silently ignores it. BOTH the
+  `.waitForFunction` predicate below AND the final `.evaluate` call are an
+  explicit IIFE (`(() => ...)()`), not a bare arrow-function string: passed
+  as-is, `page.evaluate`/`page.waitForFunction` treat a string as an
+  *expression* to evaluate, and a bare `\"() => ...\"` expression evaluates
+  to a function VALUE (never actually CALLED) rather than the predicate's
+  actual result -- for `.evaluate` this is unserializable and silently
+  drops to `undefined` (confirmed by a real crash this caused: `.includes`
+  called on the resulting `undefined`); for `.waitForFunction` it's WORSE
+  and silent, not a crash: a function value is always truthy, so the
+  'condition' is satisfied on the very first poll regardless of the actual
+  DOM state, and `wait-for-shadow-text` returns immediately with
+  WHATEVER `pre.textContent` happens to be at that instant (often still
+  empty) -- confirmed live: this masked itself in the first consumer of
+  this helper (fast, main-thread-only guests, already done by the time
+  polling starts) and only surfaced once a slower, Worker-hosted guest
+  needed this same helper to actually wait."
   ([page selector] (wait-for-shadow-text page selector 20000))
   ([page selector timeout]
    (let [sel (js/JSON.stringify selector)]
      (-> (.waitForFunction page
-                            (str "() => { const el = document.querySelector(" sel ");"
+                            (str "(() => { const el = document.querySelector(" sel ");"
                                  "const pre = el && el.shadowRoot && el.shadowRoot.querySelector('pre');"
-                                 "return !!(pre && pre.textContent.length > 0); }")
+                                 "return !!(pre && pre.textContent.length > 0); })()")
                             nil #js {:timeout timeout})
          (.then (fn []
                   (.evaluate page
