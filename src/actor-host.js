@@ -102,9 +102,37 @@ export const DEFAULT_RUNTIME_LIMITS = {
   maxLlmInfers: 0,
   maxLogReadBytes: 1048576,
   maxLogWriteBytes: 65536,
+  // null/undefined = unrestricted (the default -- preserves prior behavior
+  // for every existing caller that never set this). When a non-empty
+  // array, http-post is allowed only to URLs starting with one of these
+  // prefixes -- mirrors kototama.contract's :allowed-url-prefixes /
+  // url-allowed? 1:1 (same opt-in, fail-closed, per-call semantics; see
+  // urlAllowed below). NOT checked by validateImportSurface, same reason
+  // maxLogReadBytes-adjacent limits aren't: it doesn't gate whether the
+  // import is granted, only which URLs a granted call may reach.
+  allowedUrlPrefixes: null,
   allowSecretImports: false,
   allowWriteImports: false,
 };
+
+/**
+ * true iff url is permitted under limits.allowedUrlPrefixes.
+ * null/undefined/empty allowedUrlPrefixes means unrestricted (the default).
+ *
+ * Note: this is the only http-post hardening layer implemented here.
+ * kototama.tender (the JVM host) additionally runs an unconditional
+ * denylist against loopback/private/link-local/metadata destinations by
+ * resolving the hostname via java.net.InetAddress before connecting; a
+ * browser tab has no equivalent synchronous (or even straightforward
+ * async) DNS-resolution API to port that check to, so that layer is NOT
+ * mirrored here -- a real gap, not an oversight, left for a dedicated
+ * follow-up rather than a rushed partial port.
+ */
+export function urlAllowed(limits, url) {
+  const prefixes = limits && limits.allowedUrlPrefixes;
+  if (!prefixes || prefixes.length === 0) return true;
+  return prefixes.some((p) => url.startsWith(p));
+}
 
 export const DEFAULT_HOST_CAPS = {
   namespace: ACTOR_HOST_NAMESPACE,
@@ -377,7 +405,9 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
 
   // `(url-ptr url-len body-ptr body-len out-ptr out-cap) -> bytes-written|-1`.
   // Wired only when a synchronous backend exists (inject or SAB bridge).
-  // Runtime-metered against maxHttpPosts (in-band -1 when exhausted).
+  // Runtime-metered against maxHttpPosts (in-band -1 when exhausted), and
+  // against limits.allowedUrlPrefixes (opt-in, unrestricted by default;
+  // see urlAllowed above) -- same in-band -1 fail-closed convention.
   const httpPostSync =
     typeof opts.httpPost === 'function'
       ? opts.httpPost
@@ -390,6 +420,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       ensureGranted('http-post');
       if (state.httpPosts >= c.limits.maxHttpPosts) return -1;
       const url = new TextDecoder().decode(readBytes(urlPtr, urlLen));
+      if (!urlAllowed(c.limits, url)) return -1;
       const body = readBytes(bodyPtr, bodyLen);
       let resp;
       try {
