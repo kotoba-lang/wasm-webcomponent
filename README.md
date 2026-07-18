@@ -61,9 +61,13 @@ KotobaWasmElement.define('my-cap-demo', {
 });
 ```
 
-Module using the `actor:host` ABI (`src/actor-host.js`'s port of
-`kototama.contract`'s HostCaps/RuntimeLimits, `kototama-lang/kototama`'s
-JVM tender's browser-side counterpart):
+Module using the `actor:host` ABI (`src/actor-host.js`'s peer,
+browser/Node-native implementation of `kototama.contract`'s HostCaps/
+RuntimeLimits — `tender` is a host-language-independent role, not a JVM
+concept; this is an independent, non-JVM implementation of that role
+alongside `kotoba-lang/kototama`'s JVM/Chicory `kototama.tender`, not a
+port derived from it. It does not cover the full capability surface of
+the JVM implementation — see "Scope" below):
 
 ```js
 import { KotobaWasmElement } from './src/kotoba-wasm-element.js';
@@ -140,13 +144,20 @@ KotobaWasmElement.define('my-actor-host-demo', {
   parity proof: the same 300-tick run asserts the exact entity counts
   (`12` at tick 240, `8` after the tick-270 nova burst, `10` at 300,
   seed 7) kotoba's own JVM/Chicory test pins.
-- `src/actor-host.js` — browser-side port of `kototama.contract` /
-  `kototama.tender` host ABI. Unconditionally sync: clock / sha256 /
+- `src/actor-host.js` — a peer, browser/Node-native implementation of the
+  `tender` role `kototama.contract` defines (the same role
+  `kotoba-lang/kototama`'s JVM/Chicory `kototama.tender` implements —
+  `tender` names a host-language-independent role, not a JVM-specific
+  concept; see ADR-2607183010). Unconditionally sync: clock / sha256 /
   gen-keypair / sign / verify / log-*. Conditional: `llm-infer`
   (`opts.llmInfer`), **`http-post`** (`opts.httpPost` inject, or
   `opts.httpPostBridge` SAB+COOP via `http-post-bridge.js`). JSPI is
-  detected (`httpPostCapabilities`) but not the default wire. See
-  `test/verify-http-post.mjs` + `examples/http-post-echo.wasm`.
+  detected (`httpPostCapabilities`) but not the default wire. This is not
+  full capability parity with the JVM/Chicory implementation: `llm-infer`
+  has no in-browser inference path (Node-inject only) and `http-post` has
+  no fully-synchronous default (no synchronous `fetch`) — see "Scope"
+  below for the complete honest gap list. See `test/verify-http-post.mjs`
+  + `examples/http-post-echo.wasm`.
 - `src/vendor/` — the actual, unmodified `@noble/curves`/`@noble/hashes`
   source files `actor-host.js`'s ed25519 imports need, copied file-for-file
   (not hand-transcribed) with only bare-specifier import paths patched to
