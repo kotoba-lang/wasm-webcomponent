@@ -14,6 +14,8 @@ import {
   validateImportSurface,
   actorHostImports,
   inMemoryStore,
+  memoryPagesUsed,
+  memoryWithinCap,
 } from '../src/actor-host.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -305,6 +307,65 @@ check(preflightThrew, 'actorHostImports throws pre-flight when the surface is re
     `llm_infer POSTs to opts.llmInferUrl via the bridge (got ${JSON.stringify(calls)})`);
   check(calls[0].body === 'hi', `the bridge receives the raw decoded prompt as the POST body (got ${JSON.stringify(calls[0]?.body)})`);
   check(reply === 'proxied:hi', `the bridge's reply is written back into guest memory (got ${JSON.stringify(reply)})`);
+}
+
+// ── maxMemoryPages: memoryPagesUsed/memoryWithinCap pure helpers ───────────
+// kototama.contract's default-runtime-limits :max-memory-pages is 16 (1
+// MiB) -- same default DEFAULT_RUNTIME_LIMITS.maxMemoryPages uses here.
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  check(memoryPagesUsed(memoryBox) === 1, `1-page memory reports 1 page (got ${memoryPagesUsed(memoryBox)})`);
+  check(memoryWithinCap(memoryBox, hostCaps()), '1-page memory is within the default 16-page cap');
+
+  memoryBox.memory.grow(20); // now 21 pages, over the 16-page default cap
+  check(memoryPagesUsed(memoryBox) === 21, `after grow(20), reports 21 pages (got ${memoryPagesUsed(memoryBox)})`);
+  check(!memoryWithinCap(memoryBox, hostCaps()), '21-page memory exceeds the default 16-page cap');
+  check(
+    memoryWithinCap(memoryBox, hostCaps({ limits: { maxMemoryPages: 32 } })),
+    '21-page memory is within an explicitly-raised 32-page cap'
+  );
+}
+
+// ── maxMemoryPages: reactive per-call gating inside actorHostImports --
+// growth AFTER instantiation (simulated here by growing memoryBox.memory
+// directly, since these unit tests don't run a real guest export) is
+// caught the next time a gated host-import is called, same in-band -1
+// convention maxLogWriteBytes-adjacent limits use (see overMemoryCap's
+// doc comment in actor-host.js for why this is reactive, not preventive,
+// in a browser/Node host) ───────────────────────────────────────────────
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const fns = actorHostImports(
+    ['sha256-hex', 'verify'],
+    hostCaps({ grants: ['sha256-hex', 'verify'] }),
+    memoryBox,
+    {}
+  );
+  const before = fns.sha256_hex(0, 0, 100, 64);
+  check(before >= 0, `sha256_hex succeeds while memory is within the default cap (got ${before})`);
+
+  memoryBox.memory.grow(20); // now 21 pages, over the 16-page default cap
+  const after = fns.sha256_hex(0, 0, 100, 64);
+  check(after === -1, `sha256_hex returns -1 once memory exceeds maxMemoryPages, not a throw (got ${after})`);
+
+  const verifyDenied = fns.verify(0, 0, 0, 0, 0, 0);
+  check(verifyDenied === 0, `verify returns its own 0 (not -1) denial shape once over the memory cap (got ${verifyDenied})`);
+}
+
+// ── maxMemoryPages: raising the cap via HostCaps limits (same "guest that
+// legitimately needs more grows this explicitly" escape hatch every other
+// limit here has) permits the same call that was just denied above ──────
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  memoryBox.memory.grow(20); // 21 pages, over the default 16-page cap
+  const fns = actorHostImports(
+    ['sha256-hex'],
+    hostCaps({ grants: ['sha256-hex'], limits: { maxMemoryPages: 32 } }),
+    memoryBox,
+    {}
+  );
+  const result = fns.sha256_hex(0, 0, 100, 64);
+  check(result >= 0, `sha256_hex succeeds at 21 pages once maxMemoryPages is explicitly raised to 32 (got ${result})`);
 }
 
 if (failed) process.exit(1);

@@ -22,7 +22,7 @@
 // browser-shipped JS/HTML calling the provider directly; that's the whole
 // reason this is a caller-supplied URL instead of a built-in Anthropic call
 // like `kototama.tender`'s (JVM-only, server-side) `anthropic-infer`.
-import { actorHostImports, hostCaps } from './actor-host.js';
+import { actorHostImports, hostCaps, memoryWithinCap } from './actor-host.js';
 import { createSabHttpPostBridge } from './http-post-bridge.js';
 
 self.onmessage = async (event) => {
@@ -48,6 +48,16 @@ self.onmessage = async (event) => {
     const response = await fetch(msg.src);
     const { instance } = await WebAssembly.instantiateStreaming(response, importObject);
     memoryBox.memory = instance.exports.memory;
+    // Preventive check, run BEFORE the guest's export is ever called (see
+    // memoryWithinCap's doc comment in actor-host.js): refuses a guest
+    // whose own declared memory section already exceeds the page cap.
+    // Growth DURING the call itself is only caught reactively, per
+    // host-import call (actorHostImports' `overMemoryCap`) -- a guest that
+    // grows past budget and never calls back into the host isn't caught
+    // until it returns, if at all.
+    if (!memoryWithinCap(memoryBox, caps)) {
+      throw new Error('kototama actor-host: guest memory exceeds maxMemoryPages before running');
+    }
     const fn = instance.exports[msg.exportName || 'main'];
     if (typeof fn !== 'function') {
       throw new Error(`module has no export "${msg.exportName || 'main'}"`);

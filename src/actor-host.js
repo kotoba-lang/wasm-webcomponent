@@ -108,6 +108,27 @@ export const DEFAULT_RUNTIME_LIMITS = {
   maxLlmInfers: 0,
   maxLogReadBytes: 1048576,
   maxLogWriteBytes: 65536,
+  // 16 Wasm pages (64 KiB/page) = 1 MiB -- same value and rationale as
+  // kototama.contract's `default-runtime-limits` :max-memory-pages
+  // (contract.cljc:226). kototama.tender (JVM/Chicory) enforces this
+  // PREVENTIVELY at instantiation time via Chicory's stable
+  // `Instance.Builder/withMemoryLimits` (tender.clj:557-572,646-651),
+  // capping how far a guest's OWN `memory.grow` can reach before the
+  // engine itself refuses the grow. There is no browser/Node equivalent:
+  // kotoba-wasm-emitted modules EXPORT their own memory (not host-import
+  // it -- see `instance.exports.memory` throughout this repo's *-element.js
+  // / *-worker-host.js), and the standard `WebAssembly.instantiate` JS API
+  // gives the host no hook to override a module's own declared memory
+  // ceiling. So this is enforced REACTIVELY here instead: every gated
+  // host-import call below re-checks current page count via
+  // `memoryPagesUsed`/`ensureMemoryWithinCap` and denies (-1) once over
+  // budget, same in-band convention `maxLogReadBytes`-adjacent limits use.
+  // This is real protection for the common case (a guest that grows memory
+  // then calls back into the host), but NOT for a guest that blows past
+  // the cap in one shot and never calls a host import again -- a genuine
+  // residual gap, not an oversight (see `memoryWithinCap`'s doc comment
+  // for the instantiation-time check that closes part of it).
+  maxMemoryPages: 16,
   // null/undefined = unrestricted (the default -- preserves prior behavior
   // for every existing caller that never set this). When a non-empty
   // array, http-post is allowed only to URLs starting with one of these
@@ -138,6 +159,34 @@ export function urlAllowed(limits, url) {
   const prefixes = limits && limits.allowedUrlPrefixes;
   if (!prefixes || prefixes.length === 0) return true;
   return prefixes.some((p) => url.startsWith(p));
+}
+
+/**
+ * Current wasm linear-memory size, in 64 KiB pages. 0 before
+ * `memoryBox.memory` is set (pre-instantiation) -- callers past that point
+ * always have a real `WebAssembly.Memory` there. Uses division rather than
+ * a `>>> 16` shift so a memory at exactly the wasm32 4 GiB ceiling doesn't
+ * wrap through ToUint32.
+ */
+export function memoryPagesUsed(memoryBox) {
+  const buf = memoryBox && memoryBox.memory && memoryBox.memory.buffer;
+  return buf ? Math.floor(buf.byteLength / 65536) : 0;
+}
+
+/**
+ * true iff the guest's CURRENT linear-memory size is within
+ * `caps.limits.maxMemoryPages`. Callers that own the instantiate/call
+ * sequence (kotoba-wasm-worker-host.js) use this right after
+ * `memoryBox.memory = instance.exports.memory` and BEFORE calling the
+ * guest's export, to refuse a guest that already declares an
+ * over-budget memory section -- the one preventive check available
+ * without engine-level support (see `maxMemoryPages`'s doc comment for
+ * why growth DURING a call can only be checked reactively, per-call,
+ * not prevented).
+ */
+export function memoryWithinCap(memoryBox, caps) {
+  const c = hostCaps(caps);
+  return memoryPagesUsed(memoryBox) <= c.limits.maxMemoryPages;
 }
 
 export const DEFAULT_HOST_CAPS = {
@@ -314,6 +363,15 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       throw new Error(`kototama actor-host: ${id} denied (grant/missing)`);
     }
   };
+  // Reactive counterpart to `maxMemoryPages` (see its doc comment on
+  // DEFAULT_RUNTIME_LIMITS for why this can't be preventive here). Every
+  // host-import below that has an in-band denial value checks this FIRST,
+  // same "cheapest check first" ordering `ensureGranted` already has
+  // relative to the rest of each function body. Skipped by
+  // `clock_monotonic` (no denial value in its return shape, and it writes
+  // no attacker-controlled bytes into guest memory, so gating it adds no
+  // real protection).
+  const overMemoryCap = () => memoryPagesUsed(memoryBox) > c.limits.maxMemoryPages;
 
   const fns = {};
 
@@ -324,6 +382,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('sha256-hex')) {
     fns.sha256_hex = (ptr, len, outPtr, outCap) => {
       ensureGranted('sha256-hex');
+      if (overMemoryCap()) return -1;
       const hex = sha256Hex(readBytes(ptr, len));
       return writeBytes(outPtr, outCap, new TextEncoder().encode(hex));
     };
@@ -335,6 +394,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('gen-keypair')) {
     fns.gen_keypair = (outPtr, outCap) => {
       ensureGranted('gen-keypair');
+      if (overMemoryCap()) return -1;
       const seed = ed25519.utils.randomPrivateKey();
       const pub = ed25519.getPublicKey(seed);
       const out = new Uint8Array(64);
@@ -349,6 +409,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('sign')) {
     fns.sign = (seedPtr, msgPtr, msgLen, outPtr, outCap) => {
       ensureGranted('sign');
+      if (overMemoryCap()) return -1;
       const seed = readBytes(seedPtr, 32);
       const msg = readBytes(msgPtr, msgLen);
       const sig = ed25519.sign(msg, seed);
@@ -360,6 +421,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('verify')) {
     fns.verify = (pubPtr, pubLen, msgPtr, msgLen, sigPtr, sigLen) => {
       ensureGranted('verify');
+      if (overMemoryCap()) return 0; // this fn's own 1|0 denial shape, not -1
       const pub = readBytes(pubPtr, pubLen);
       const msg = readBytes(msgPtr, msgLen);
       const sig = readBytes(sigPtr, sigLen);
@@ -370,6 +432,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('log-read')) {
     fns.log_read = (outPtr, outCap) => {
       ensureGranted('log-read');
+      if (overMemoryCap()) return -1;
       const bytes = store.read();
       if (state.logReadBytes + bytes.length > c.limits.maxLogReadBytes) return -1;
       state.logReadBytes += bytes.length;
@@ -380,6 +443,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('log-write')) {
     fns.log_write = (ptr, len) => {
       ensureGranted('log-write');
+      if (overMemoryCap()) return -1;
       const bytes = readBytes(ptr, len);
       if (state.logWriteBytes + bytes.length > c.limits.maxLogWriteBytes) return -1;
       state.logWriteBytes += bytes.length;
@@ -429,6 +493,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('llm-infer') && llmInferSync) {
     fns.llm_infer = (promptPtr, promptLen, outPtr, outCap) => {
       ensureGranted('llm-infer');
+      if (overMemoryCap()) return -1;
       if (state.llmInfers >= c.limits.maxLlmInfers) return -1;
       const prompt = new TextDecoder().decode(readBytes(promptPtr, promptLen));
       let text;
@@ -459,6 +524,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('http-post') && httpPostSync) {
     fns.http_post = (urlPtr, urlLen, bodyPtr, bodyLen, outPtr, outCap) => {
       ensureGranted('http-post');
+      if (overMemoryCap()) return -1;
       if (state.httpPosts >= c.limits.maxHttpPosts) return -1;
       const url = new TextDecoder().decode(readBytes(urlPtr, urlLen));
       if (!urlAllowed(c.limits, url)) return -1;
