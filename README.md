@@ -95,16 +95,20 @@ KotobaWasmElement.define('my-actor-host-demo', {
   Only pull this in if your module actually calls `kgraph-assert!`/
   `kgraph-query`/etc.
 - `examples/hello/` — zero-import module (`kotoba wasm emit src/demo.kotoba`,
-  73 bytes, `main()` returns 42).
+  102 bytes, `main()` returns 42).
 - `examples/kgraph/` — a module using the `kgraph-*` host imports
   (`kotoba wasm emit src/demo_kgraph.kotoba --policy src/demo_kgraph_policy.edn`,
-  219 bytes).
+  248 bytes).
 - `examples/gcd/` — a brand-new `.kotoba` program (`gcd.kotoba`, included)
   demonstrating real runtime recursion (the Euclidean algorithm), not a
   hardcoded constant or a compile-time-folded computation. Compiled with
-  `kotoba wasm emit gcd.kotoba --package-lock <empty-deps-lock>` (96 bytes;
+  `kotoba wasm emit gcd.kotoba --package-lock <empty-deps-lock>` (145 bytes;
   see kotoba-lang/kotoba#284 for why an empty-deps lock is needed for a
-  zero-dependency build).
+  zero-dependency build). Byte counts above (and every other example's,
+  as of kotoba-lang/kotoba's embedded-fuel change) include the
+  module-private fuel global + per-function charge prologue every
+  `kotoba wasm emit` output now carries — see `wasm-binary`'s doc comment
+  in that repo's `runtime.clj` for why.
 - `src/has-capability.js` — optional: a browser-side port of
   `kotoba-lang/kotoba`'s `has_capability` host import
   (`kotoba.wasm-exec/has-capability-fn`), for modules with a runtime
