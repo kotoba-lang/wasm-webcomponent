@@ -5,6 +5,22 @@
 // the library kotoba-lang/kototama's original `web/` PoC (kototama-wasm-run.js
 // + kototama-wasm-kgraph-demo.js) was extracted from -- see README.md.
 //
+// NO fuel or memory-cap protection here, structurally, not just by
+// omission: `fn()` below runs synchronously on the MAIN/DOM thread, so
+// there is no way for any JS code (a `setTimeout`, another thread, nothing)
+// to preempt or observe it mid-call -- a genuinely-hanging or
+// memory-bombing guest freezes the whole page/tab until it returns (or
+// the OS kills the process). `KotobaWasmWorkerElement`
+// (kotoba-wasm-worker-element.js) exists specifically to fix this: it runs
+// the guest in a dedicated Worker so a wall-clock deadline can
+// `worker.terminate()` a runaway guest (its own namespace comment explains
+// why that's the achievable fuel-equivalent here, versus
+// kototama.tender's real instruction-count fuel). `actorHostImports`'
+// `maxMemoryPages` reactive check (actor-host.js) still applies if a
+// `createImports` implementation uses it, but that only catches a guest
+// that also calls back into the host after growing -- prefer
+// `KotobaWasmWorkerElement` for anything untrusted or capability-bearing.
+//
 // Usage (zero-import module):
 //   import { KotobaWasmElement } from './kotoba-wasm-element.js';
 //   KotobaWasmElement.define('my-wasm-run');

@@ -528,6 +528,39 @@ silently.
   `WebAssembly.instantiateStreaming` runs) and per host-function call —
   but only for the 4 imports it implements. Don't treat a page built on
   this library as a sandboxed multi-tenant host in general.
+- **Resource limits (`maxMemoryPages`/`max-wall-ms`) are real but weaker
+  than `kototama.tender`'s (JVM/Chicory) equivalents, structurally, not
+  just by omission.** `kototama.contract`'s `default-runtime-limits`
+  defines both `:max-memory-pages` (16 pages/1 MiB) and `:max-wall-ms`
+  (5000 ms) as host-adapter-enforced limits; this repo now implements
+  both, but:
+  - `maxMemoryPages` (`actor-host.js`) is enforced REACTIVELY (checked on
+    every gated host-import call, `-1` once over budget) and once
+    PREVENTIVELY at instantiation time (`memoryWithinCap`, used by
+    `kotoba-wasm-worker-host.js` before calling the guest's export) — not
+    continuously during a call, unlike `tender.clj`'s `MemoryLimits`,
+    which caps `memory.grow` itself at the Chicory engine level. A guest
+    that grows past budget in one shot and never calls back into the host
+    is not caught. This isn't an oversight: kotoba-wasm-emitted modules
+    EXPORT their own memory rather than importing a host-provided one, and
+    the standard `WebAssembly.instantiate` JS API gives no hook to cap an
+    exported memory's growth from outside.
+  - `max-wall-ms` (`kotoba-wasm-worker-element.js` only — `maxWallMs`
+    attribute, default 5000) hard-`terminate()`s the guest's dedicated
+    Worker past the deadline — a real, working defense, but wall-clock,
+    not instruction-count, unlike `tender.clj`'s `fuel-listener`. There is
+    no portable way to preempt a running, JIT-compiled WASM call from JS
+    mid-instruction the way Chicory's per-instruction interpreter dispatch
+    can. `KotobaWasmElement` (the non-Worker element) has NO such
+    protection at all and structurally cannot: its guest runs
+    synchronously on the main/DOM thread, where nothing (not even a
+    `setTimeout`) can preempt it — use `KotobaWasmWorkerElement` for
+    anything untrusted or capability-bearing.
+  - A follow-up with true per-instruction fuel (mirroring `fuel-listener`
+    exactly) would require the `kotoba-lang/compiler` wasm backend to
+    inject cooperative fuel-check instructions at loop back-edges/call
+    sites — a compiler change, out of this repo's scope, tracked
+    separately from this host-side interim fix.
 - **Not every kotoba-lang repo has `.kotoba` source to point this at.**
   Most `kotoba-*`-named repos in the org (`lint-kotoba`, `kotoba-code`,
   `kotoba-procedure-clj`, ...) are regular `.cljc`/`.clj` Clojure libraries
