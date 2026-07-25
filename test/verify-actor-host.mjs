@@ -66,6 +66,15 @@ check(
 const granted = validateImportSurface(['clock-monotonic', 'sha256-hex'], hostCaps({ grants: ['clock-monotonic', 'sha256-hex'] }));
 check(granted.ok === true, `clock-monotonic+sha256-hex granted and requested both pass validation (got ${JSON.stringify(granted.errors)})`);
 
+const httpGetDenied = validateImportSurface(
+  ['http-get'],
+  hostCaps({ grants: ['http-get'], limits: { allowWriteImports: true } })
+);
+check(
+  httpGetDenied.ok === false && httpGetDenied.errors.some((e) => e.error === 'limit/max-http-gets'),
+  `http-get is default-denied by maxHttpGets=0 (got ${JSON.stringify(httpGetDenied.errors)})`
+);
+
 // ── validateImportSurface: the remaining four denial branches, previously
 // untested (only grants/missing and limit/secret-imports had coverage
 // above) ────────────────────────────────────────────────────────────────
@@ -191,6 +200,35 @@ check(preflightThrew, 'actorHostImports throws pre-flight when the surface is re
   check(ok === 1, `guest gen_keypair -> sign -> verify round-trips true through real Chicory-equivalent WASM (got ${ok})`);
 }
 
+// ── kagi-sign: only a decision-aware trusted adapter is linkable; the guest
+// receives signature bytes, never key material or an unrestricted signer. ──
+{
+  const denied = validateImportSurface(['kagi-sign'], hostCaps({ grants: ['kagi-sign'] }));
+  check(!denied.ok && denied.errors.some(e => e.error === 'limit/max-kagi-signs'),
+    'kagi-sign is default-denied by its finite invocation quota');
+  const memory = new WebAssembly.Memory({ initial: 1 }), memoryBox = { memory };
+  const caps = hostCaps({ grants: ['kagi-sign'], limits: { maxKagiSigns: 1 } });
+  const absent = actorHostImports(['kagi-sign'], caps, memoryBox, {});
+  check(typeof absent.kagi_sign === 'undefined', 'kagi-sign stays unlinked without a decision-aware trusted adapter');
+  const decisions = [{ ref: 'kagi://ops/key', purpose: 'release' }];
+  const calls = [];
+  const fns = actorHostImports(['kagi-sign'], caps, memoryBox, {
+    runtime: 'node',
+    kagiDecisions: decisions,
+    kagiSigner: { authorizedSign(actualDecisions, ref, message) {
+      calls.push({ actualDecisions, ref, message: [...message] }); return new Uint8Array(64).fill(7);
+    } },
+  });
+  const ref = new TextEncoder().encode('kagi://ops/key'), message = new Uint8Array([1,2,3]);
+  new Uint8Array(memory.buffer, 0, ref.length).set(ref); new Uint8Array(memory.buffer, 64, message.length).set(message);
+  check(fns.kagi_sign(0, ref.length, 64, message.length, 128, 64) === 64,
+    'kagi-sign returns only bounded signature bytes through the trusted adapter');
+  check(calls.length === 1 && calls[0].actualDecisions === decisions && calls[0].ref === 'kagi://ops/key' && calls[0].message.join(',') === '1,2,3',
+    'kagi-sign threads the exact decision set, opaque reference and message');
+  check(fns.kagi_sign(0, ref.length, 64, message.length, 128, 64) === -1,
+    'kagi-sign exhausts its finite per-session quota');
+}
+
 // ── gen_keypair/sign/verify without allowSecretImports: denied pre-flight,
 // same limit/secret-imports gate kototama.contract's default-runtime-limits
 // enforces (RuntimeLimits' :allow-secret-imports? false by default) ────────
@@ -228,6 +266,91 @@ check(preflightThrew, 'actorHostImports throws pre-flight when the surface is re
     // no opts.llmInfer
   );
   check(fns.llm_infer === undefined, 'fns.llm_infer is absent when no opts.llmInfer backend is supplied');
+}
+
+// ── high-level http-get: injected sync bridge only; exact endpoint/path,
+// manual redirects, output cap, and fail-closed absence/invalid reply. ─────
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const encoder = new TextEncoder();
+  const host = encoder.encode('example.test');
+  const requestPath = encoder.encode('/bounded');
+  new Uint8Array(memoryBox.memory.buffer, 0, host.length).set(host);
+  new Uint8Array(memoryBox.memory.buffer, 32, requestPath.length).set(requestPath);
+  let seen = null;
+  const caps = hostCaps({
+    grants: ['http-get'],
+    limits: {
+      maxHttpGets: 1,
+      allowWriteImports: true,
+      httpUrlAllowlist: ['https://example.test:443/bounded'],
+    },
+  });
+  const absent = actorHostImports(['http-get'], caps, memoryBox);
+  check(absent.http_get === undefined, 'http_get stays unlinked without an explicit synchronous bridge');
+  const fns = actorHostImports(['http-get'], caps, memoryBox, {
+    httpGet: (request) => {
+      seen = request;
+      return encoder.encode('HTTP/1.1 200 OK\r\n\r\nok');
+    },
+  });
+  const n = fns.http_get(0, host.length, 443, 32, requestPath.length, 128, 64);
+  check(
+    JSON.stringify(seen) === JSON.stringify({
+      host: 'example.test', port: 443, path: '/bounded', maxBytes: 64, redirect: 'manual',
+    }),
+    `http_get bridge receives exact scoped request (got ${JSON.stringify(seen)})`
+  );
+  const response = new TextDecoder().decode(new Uint8Array(memoryBox.memory.buffer, 128, n));
+  check(response === 'HTTP/1.1 200 OK\r\n\r\nok', `http_get writes bounded response bytes (got ${JSON.stringify(response)})`);
+  check(fns.http_get(0, host.length, 443, 32, requestPath.length, 128, 64) === -1,
+    'http_get enforces its per-session request quota');
+
+  const wrongScope = actorHostImports(['http-get'], hostCaps({
+    grants: ['http-get'],
+    limits: {
+      maxHttpGets: 1,
+      allowWriteImports: true,
+      httpUrlAllowlist: ['https://example.test:443/bounded'],
+    },
+  }), memoryBox, { httpGet: () => encoder.encode('unexpected') });
+  check(wrongScope.http_get(0, host.length, 443, 32, requestPath.length - 1, 128, 64) === -1,
+    'http_get rejects a path outside the structured HTTPS allowlist before injection');
+}
+
+// ── http-post: injected sync bridge, structured HTTPS scope and quota. ───
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const encoder = new TextEncoder();
+  const url = encoder.encode('https://api.example.test/v1/messages');
+  const body = encoder.encode('{"prompt":"hi"}');
+  new Uint8Array(memoryBox.memory.buffer, 0, url.length).set(url);
+  new Uint8Array(memoryBox.memory.buffer, 64, body.length).set(body);
+  let seen = null;
+  const caps = hostCaps({
+    grants: ['http-post'],
+    limits: {
+      maxHttpPosts: 1,
+      httpUrlAllowlist: ['https://api.example.test/v1'],
+    },
+  });
+  const absent = actorHostImports(['http-post'], caps, memoryBox);
+  check(absent.http_post === undefined, 'http_post stays unlinked without an explicit synchronous bridge');
+  const fns = actorHostImports(['http-post'], caps, memoryBox, {
+    httpPost: (request) => {
+      seen = request;
+      return encoder.encode('accepted');
+    },
+  });
+  const n = fns.http_post(0, url.length, 64, body.length, 128, 32);
+  check(seen?.url === 'https://api.example.test/v1/messages' &&
+        new TextDecoder().decode(seen.body) === '{"prompt":"hi"}' &&
+        seen.redirect === 'manual',
+    `http_post bridge receives scoped URL/body (got ${JSON.stringify(seen)})`);
+  check(new TextDecoder().decode(new Uint8Array(memoryBox.memory.buffer, 128, n)) === 'accepted',
+    'http_post writes the bounded response');
+  check(fns.http_post(0, url.length, 64, body.length, 128, 32) === -1,
+    'http_post enforces its per-session request quota');
 }
 
 // ── llm-infer: with a fake synchronous opts.llmInfer, a real prompt/reply
