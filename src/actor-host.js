@@ -98,6 +98,16 @@ export const IMPORT_SURFACE = [
   // implementation exists" honesty `http-post`'s comment above documents,
   // just environment-dependent instead of universally absent.
   { id: 'llm-infer', category: 'llm', effects: new Set(['network']) },
+  // Codec imports (ADR-2607230943 second wave). Pure computation, no
+  // network/DOM dependency -- a faithful byte-for-byte JS port of
+  // kototama.tender's (JVM) flat-pairs -> CBOR/JSON encoders and bounded
+  // JSON string-field scan, so they link in a plain browser tab (no
+  // SAB/Worker bridge needed, unlike http-post/llm-infer). See the
+  // `parseFlatPairs`/`treeNodeToCbor`/`treeNodeToJson`/`jsonStringFieldValue`
+  // helpers below.
+  { id: 'cbor-encode', category: 'codec', effects: new Set() },
+  { id: 'json-encode', category: 'codec', effects: new Set() },
+  { id: 'json-extract-field', category: 'codec', effects: new Set() },
 ];
 
 const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
@@ -341,6 +351,184 @@ export function inMemoryStore() {
 // thrown error -- so a well-behaved guest can see it and back off, exactly
 // like `kototama.tender`'s distinction between a hard-thrown grant
 // violation and a soft quota signal.
+// ── Codec helpers: a byte-for-byte JS port of kototama.tender's (JVM)
+// flat-pairs wire format and CBOR/JSON encoders. The guest-facing wire
+// format is ONE `key<TAB>value` pair per LF-separated line, in the guest's
+// own order; a key MAY be a dot-separated path ("s.t", "resources.0") for
+// one interpretation of object/array nesting. This is deliberately NOT a
+// general codec: only flat string->string maps (with dotted-path nesting)
+// are representable. Every function below mirrors the same-named Clojure
+// helper in `kototama/src/kototama/tender.clj`; keep them byte-identical.
+
+const utf8Encoder = new TextEncoder();
+
+// `parse-flat-pairs`: one `key<TAB>value` pair per non-blank line; a
+// non-blank line with no TAB is fail-soft dropped. Order preserved.
+function parseFlatPairs(s) {
+  const pairs = [];
+  for (const line of s.split('\n')) {
+    if (line.trim() === '') continue;
+    const i = line.indexOf('\t');
+    if (i < 0) continue;
+    pairs.push([line.slice(0, i), line.slice(i + 1)]);
+  }
+  return pairs;
+}
+
+function numericKey(s) {
+  return /^\d+$/.test(s);
+}
+
+// `array-entries?`: entries (vector of [key,val]) has EXACTLY keys
+// "0".."(count-1)" in any order.
+function arrayEntries(entries) {
+  if (entries.length === 0) return false;
+  const ints = new Set();
+  for (const [k] of entries) {
+    if (!numericKey(k)) return false;
+    ints.add(Number.parseInt(k, 10));
+  }
+  if (ints.size !== entries.length) return false;
+  for (let i = 0; i < entries.length; i++) if (!ints.has(i)) return false;
+  return true;
+}
+
+// `object-entries-assoc`: replace SEG's value in place, or append.
+function objectEntriesAssoc(entries, seg, value) {
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i][0] === seg) {
+      entries[i] = [seg, value];
+      return entries;
+    }
+  }
+  entries.push([seg, value]);
+  return entries;
+}
+
+// `assoc-path!`: insert VALUE at PATH (array of segments) into ENTRIES,
+// creating intermediate object-shaped subtrees (arrays of pairs).
+function assocPath(entries, path, value) {
+  const [seg, ...more] = path;
+  if (more.length > 0) {
+    let existing;
+    for (const [k, v] of entries) if (k === seg) { existing = v; break; }
+    const child = Array.isArray(existing) ? existing : [];
+    return objectEntriesAssoc(entries, seg, assocPath(child, more, value));
+  }
+  return objectEntriesAssoc(entries, seg, value);
+}
+
+// `build-nested-tree`: fold pairs into an ordered tree of [key,val] pairs.
+function buildNestedTree(pairs) {
+  let entries = [];
+  for (const [k, v] of pairs) entries = assocPath(entries, k.split('.'), v);
+  return entries;
+}
+
+// `cbor-head`: definite-length CBOR head for MAJOR type and count N.
+function cborHead(out, major, n) {
+  if (n < 24) out.push((major << 5) + n);
+  else if (n < 256) { out.push((major << 5) + 24); out.push(n); }
+  else if (n < 65536) {
+    out.push((major << 5) + 25);
+    out.push((n >>> 8) & 0xff);
+    out.push(n & 0xff);
+  } else throw new Error('cbor len too big');
+}
+
+function cborString(out, s) {
+  const b = utf8Encoder.encode(s);
+  cborHead(out, 3, b.length);
+  for (const byte of b) out.push(byte);
+}
+
+// `tree-node->cbor`: string leaf; non-top array node -> major 4 in ascending
+// numeric-key order; else major 5 map in guest order.
+function treeNodeToCbor(out, node, topLevel) {
+  if (typeof node === 'string') { cborString(out, node); return; }
+  if (!topLevel && arrayEntries(node)) {
+    const items = [...node].sort((a, b) => Number.parseInt(a[0], 10) - Number.parseInt(b[0], 10)).map((e) => e[1]);
+    cborHead(out, 4, items.length);
+    for (const item of items) treeNodeToCbor(out, item, false);
+    return;
+  }
+  cborHead(out, 5, node.length);
+  for (const [k, v] of node) { cborString(out, k); treeNodeToCbor(out, v, false); }
+}
+
+function cborPairsBytes(pairs) {
+  const out = [];
+  treeNodeToCbor(out, buildNestedTree(pairs), true);
+  return new Uint8Array(out);
+}
+
+// `json-escape`: iterate UTF-16 code units (Java `char`), short escapes for
+// "/\/newline/return/tab, `\uXXXX` for other C0 controls, else pass through.
+function jsonEscape(s) {
+  let sb = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const code = s.charCodeAt(i);
+    if (ch === '"') sb += '\\"';
+    else if (ch === '\\') sb += '\\\\';
+    else if (ch === '\n') sb += '\\n';
+    else if (ch === '\r') sb += '\\r';
+    else if (ch === '\t') sb += '\\t';
+    else if (code < 0x20) sb += '\\u' + code.toString(16).padStart(4, '0');
+    else sb += ch;
+  }
+  return sb;
+}
+
+// `tree-node->json`: string leaf (escaped+quoted); non-top array node -> JSON
+// array in ascending numeric-key order; else JSON object in guest order.
+function treeNodeToJson(node, topLevel) {
+  if (typeof node === 'string') return '"' + jsonEscape(node) + '"';
+  if (!topLevel && arrayEntries(node)) {
+    const items = [...node].sort((a, b) => Number.parseInt(a[0], 10) - Number.parseInt(b[0], 10)).map((e) => e[1]);
+    return '[' + items.map((it) => treeNodeToJson(it, false)).join(',') + ']';
+  }
+  return '{' + node.map(([k, v]) => '"' + jsonEscape(k) + '":' + treeNodeToJson(v, false)).join(',') + '}';
+}
+
+function jsonPairsBytes(pairs) {
+  return utf8Encoder.encode(treeNodeToJson(buildNestedTree(pairs), true));
+}
+
+// `json-string-field-value`: bounded scan for `"FIELD":"..."`. Returns the
+// unescaped value string, or null when absent/non-string/malformed.
+function jsonStringFieldValue(jsonText, field) {
+  const needle = '"' + field + '"';
+  const keyIdx = jsonText.indexOf(needle);
+  if (keyIdx < 0) return null;
+  const colonIdx = jsonText.indexOf(':', keyIdx + needle.length);
+  if (colonIdx < 0) return null;
+  const n = jsonText.length;
+  let i = colonIdx + 1;
+  // skip ASCII whitespace; require an opening quote
+  while (i < n && /\s/.test(jsonText[i])) i++;
+  if (i >= n || jsonText[i] !== '"') return null;
+  i += 1;
+  let sb = '';
+  while (i < n) {
+    const ch = jsonText[i];
+    if (ch === '\\') {
+      if (i + 1 >= n) return null;
+      const esc = jsonText[i + 1];
+      const unescaped = esc === '"' ? '"' : esc === '\\' ? '\\' : esc === 'n' ? '\n'
+        : esc === 'r' ? '\r' : esc === 't' ? '\t' : esc;
+      sb += unescaped;
+      i += 2;
+    } else if (ch === '"') {
+      return sb;
+    } else {
+      sb += ch;
+      i += 1;
+    }
+  }
+  return null;
+}
+
 export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   const c = hostCaps(caps);
   const validation = validateImportSurface(requestedIds, c);
@@ -540,6 +728,42 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       const n = writeBytes(outPtr, outCap, bytes);
       if (n >= 0) state.httpPosts += 1;
       return n;
+    };
+  }
+
+  // Codec imports -- pure computation, byte-for-byte ports of
+  // kototama.tender's JVM host fns. Not gated by any RuntimeLimits count
+  // (same as sha256_hex). `(pairs-ptr pairs-len out-ptr out-cap) ->
+  // bytes-written|-1`.
+  if (available.has('cbor-encode')) {
+    fns.cbor_encode = (ptr, len, outPtr, outCap) => {
+      ensureGranted('cbor-encode');
+      if (overMemoryCap()) return -1;
+      const pairs = parseFlatPairs(new TextDecoder().decode(readBytes(ptr, len)));
+      return writeBytes(outPtr, outCap, cborPairsBytes(pairs));
+    };
+  }
+
+  if (available.has('json-encode')) {
+    fns.json_encode = (ptr, len, outPtr, outCap) => {
+      ensureGranted('json-encode');
+      if (overMemoryCap()) return -1;
+      const pairs = parseFlatPairs(new TextDecoder().decode(readBytes(ptr, len)));
+      return writeBytes(outPtr, outCap, jsonPairsBytes(pairs));
+    };
+  }
+
+  // `(json-ptr json-len field-ptr field-len out-ptr out-cap) ->
+  // bytes-written|-1`. -1 when FIELD is absent/non-string/malformed.
+  if (available.has('json-extract-field')) {
+    fns.json_extract_field = (jsonPtr, jsonLen, fieldPtr, fieldLen, outPtr, outCap) => {
+      ensureGranted('json-extract-field');
+      if (overMemoryCap()) return -1;
+      const jsonText = new TextDecoder().decode(readBytes(jsonPtr, jsonLen));
+      const field = new TextDecoder().decode(readBytes(fieldPtr, fieldLen));
+      const value = jsonStringFieldValue(jsonText, field);
+      if (value === null) return -1;
+      return writeBytes(outPtr, outCap, utf8Encoder.encode(value));
     };
   }
 
