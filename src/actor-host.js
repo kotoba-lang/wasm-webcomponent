@@ -529,6 +529,54 @@ function jsonStringFieldValue(jsonText, field) {
   return null;
 }
 
+export function sessionAuthority(grants, useBudgets = {}) {
+  const active = new Set(grants || []);
+  const revoked = new Set();
+  const dropped = new Set();
+  const consumed = new Set();
+  const uses = new Map();
+  const remaining = new Map(
+    Object.entries(useBudgets).map(([id, value]) => {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`kototama actor-host: invalid use budget for ${id}`);
+      }
+      return [id, value];
+    })
+  );
+
+  const deactivate = (id, disposition) => {
+    active.delete(id);
+    disposition.add(id);
+  };
+
+  return Object.freeze({
+    consume(id) {
+      if (!active.has(id)) {
+        throw new Error(`kototama actor-host: ${id} denied (grant/inactive)`);
+      }
+      const left = remaining.get(id);
+      if (left !== undefined) {
+        if (left <= 0) {
+          deactivate(id, consumed);
+          throw new Error(`kototama actor-host: ${id} denied (grant/exhausted)`);
+        }
+        remaining.set(id, left - 1);
+        if (left === 1) deactivate(id, consumed);
+      }
+      uses.set(id, (uses.get(id) || 0) + 1);
+    },
+    revoke(id) { deactivate(id, revoked); },
+    drop(id) { deactivate(id, dropped); },
+    snapshot() {
+      return {
+        active: new Set(active), revoked: new Set(revoked),
+        dropped: new Set(dropped), consumed: new Set(consumed),
+        uses: new Map(uses), remaining: new Map(remaining),
+      };
+    },
+  });
+}
+
 export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   const c = hostCaps(caps);
   const validation = validateImportSurface(requestedIds, c);
@@ -539,6 +587,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   const store = opts.store || inMemoryStore();
   const state = { logReadBytes: 0, logWriteBytes: 0, httpPosts: 0, llmInfers: 0 };
   const available = new Set(validation.requested);
+  const authority = opts.authority || sessionAuthority(c.grants);
 
   const readBytes = (ptr, len) => new Uint8Array(memoryBox.memory.buffer, ptr, len).slice();
   const writeBytes = (ptr, cap, bytes) => {
@@ -547,9 +596,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
     return bytes.length;
   };
   const ensureGranted = (id) => {
-    if (!c.grants.has(id)) {
-      throw new Error(`kototama actor-host: ${id} denied (grant/missing)`);
-    }
+    authority.consume(id);
   };
   // Reactive counterpart to `maxMemoryPages` (see its doc comment on
   // DEFAULT_RUNTIME_LIMITS for why this can't be preventive here). Every
@@ -564,7 +611,10 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   const fns = {};
 
   if (available.has('clock-monotonic')) {
-    fns.clock_monotonic = () => BigInt(Date.now());
+    fns.clock_monotonic = () => {
+      ensureGranted('clock-monotonic');
+      return BigInt(Date.now());
+    };
   }
 
   if (available.has('sha256-hex')) {

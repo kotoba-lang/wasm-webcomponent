@@ -16,6 +16,8 @@ import {
   inMemoryStore,
   memoryPagesUsed,
   memoryWithinCap,
+  IMPORT_SURFACE,
+  sessionAuthority,
 } from '../src/actor-host.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -106,6 +108,35 @@ try {
   preflightThrew = true;
 }
 check(preflightThrew, 'actorHostImports throws pre-flight when the surface is rejected, before touching memoryBox');
+
+// ── session authority: every declared import has the same post-link
+// revocation and bounded-use semantics as Kototama's JVM tender ───────────
+for (const { id } of IMPORT_SURFACE) {
+  const authority = sessionAuthority([id], { [id]: 1 });
+  authority.consume(id);
+  check(
+    authority.snapshot().consumed.has(id),
+    `${id} is atomically exhausted after its one admitted use`
+  );
+  let exhausted = false;
+  try { authority.consume(id); } catch (_) { exhausted = true; }
+  check(exhausted, `${id} rejects a second use`);
+}
+
+{
+  const authority = sessionAuthority(['clock-monotonic']);
+  const fns = actorHostImports(
+    ['clock-monotonic'],
+    hostCaps({ grants: ['clock-monotonic'] }),
+    {},
+    { authority }
+  );
+  check(typeof fns.clock_monotonic() === 'bigint', 'linked clock import is initially active');
+  authority.revoke('clock-monotonic');
+  let revoked = false;
+  try { fns.clock_monotonic(); } catch (_) { revoked = true; }
+  check(revoked, 'already-linked clock import observes session revocation without re-instantiation');
+}
 
 // ── actorHostImports: RuntimeLimits exhaustion is an in-band -1, not a throw ─
 {
