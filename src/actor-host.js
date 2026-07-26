@@ -83,6 +83,7 @@ export const IMPORT_SURFACE = [
   { id: 'verify', category: 'identity', effects: new Set(['crypto']) },
   { id: 'sha256-hex', category: 'content-addressing', effects: new Set(['crypto']) },
   { id: 'http-post', category: 'network', effects: new Set(['network']) },
+  { id: 'http-fetch', category: 'network', effects: new Set(['network']) },
   { id: 'log-read', category: 'storage', effects: new Set(['storage']) },
   { id: 'log-write', category: 'storage', effects: new Set(['storage', 'write']) },
   { id: 'clock-monotonic', category: 'clock', effects: new Set(['clock']) },
@@ -108,6 +109,7 @@ export const IMPORT_SURFACE = [
   { id: 'cbor-encode', category: 'codec', effects: new Set() },
   { id: 'json-encode', category: 'codec', effects: new Set() },
   { id: 'json-extract-field', category: 'codec', effects: new Set() },
+  { id: 'http-post-headers', category: 'network', effects: new Set(['network']) },
 ];
 
 const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
@@ -115,6 +117,7 @@ const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
 export const DEFAULT_RUNTIME_LIMITS = {
   maxImports: IMPORT_SURFACE.length,
   maxHttpPosts: 0,
+  maxHttpFetches: 0,
   maxLlmInfers: 0,
   maxLogReadBytes: 1048576,
   maxLogWriteBytes: 65536,
@@ -167,7 +170,8 @@ export const DEFAULT_RUNTIME_LIMITS = {
  */
 export function urlAllowed(limits, url) {
   const prefixes = limits && limits.allowedUrlPrefixes;
-  if (!prefixes || prefixes.length === 0) return true;
+  if (prefixes == null) return true;
+  if (prefixes.length === 0) return false;
   return prefixes.some((p) => url.startsWith(p));
 }
 
@@ -230,8 +234,17 @@ export function validateImportSurface(requestedIds, caps) {
     errors.push({ error: 'limit/max-imports', limit: c.limits.maxImports, actual: known.length });
   }
   const httpPosts = known.filter((id) => id === 'http-post').length;
-  if (httpPosts > c.limits.maxHttpPosts) {
-    errors.push({ error: 'limit/max-http-posts', limit: c.limits.maxHttpPosts, actual: httpPosts });
+  const httpFetches = known.filter((id) => id === 'http-fetch').length;
+  if (httpFetches > c.limits.maxHttpFetches) {
+    errors.push({ error: 'limit/max-http-fetches', limit: c.limits.maxHttpFetches, actual: httpFetches });
+  }
+  const headerPosts = known.filter((id) => id === 'http-post-headers').length;
+  if (httpPosts + headerPosts > c.limits.maxHttpPosts) {
+    errors.push({
+      error: 'limit/max-http-posts',
+      limit: c.limits.maxHttpPosts,
+      actual: httpPosts + headerPosts,
+    });
   }
   const llmInfers = known.filter((id) => id === 'llm-infer').length;
   if (llmInfers > c.limits.maxLlmInfers) {
@@ -585,7 +598,9 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   }
 
   const store = opts.store || inMemoryStore();
-  const state = { logReadBytes: 0, logWriteBytes: 0, httpPosts: 0, llmInfers: 0 };
+  const state = {
+    logReadBytes: 0, logWriteBytes: 0, httpPosts: 0, httpFetches: 0, llmInfers: 0,
+  };
   const available = new Set(validation.requested);
   const authority = opts.authority || sessionAuthority(c.grants);
 
@@ -779,6 +794,71 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       if (n >= 0) state.httpPosts += 1;
       return n;
     };
+  }
+
+  const httpFetchSync =
+    typeof opts.httpFetch === 'function'
+      ? opts.httpFetch
+      : (opts.httpPostBridge && typeof opts.httpPostBridge.getSync === 'function'
+          ? (url) => opts.httpPostBridge.getSync(url)
+          : null);
+
+  // `(url-ptr url-len out-ptr out-cap) -> bytes-written|-1`. GET-only,
+  // independently granted and metered, while sharing the same destination
+  // allowlist and synchronous inject/SAB transport as http_post.
+  if (available.has('http-fetch') && httpFetchSync) {
+    fns.http_fetch = (urlPtr, urlLen, outPtr, outCap) => {
+      ensureGranted('http-fetch');
+      if (overMemoryCap()) return -1;
+      if (state.httpFetches >= c.limits.maxHttpFetches) return -1;
+      const url = new TextDecoder().decode(readBytes(urlPtr, urlLen));
+      if (!urlAllowed(c.limits, url)) return -1;
+      let resp;
+      try {
+        resp = httpFetchSync(url);
+      } catch (_) {
+        return -1;
+      }
+      if (resp == null) return -1;
+      const bytes = resp instanceof Uint8Array ? resp : utf8Encoder.encode(String(resp));
+      const n = writeBytes(outPtr, outCap, bytes);
+      if (n >= 0) state.httpFetches += 1;
+      return n;
+    };
+  }
+
+  const httpPostHeadersSync =
+    typeof opts.httpPostHeaders === 'function'
+      ? opts.httpPostHeaders
+      : (opts.httpPostBridge && typeof opts.httpPostBridge.postHeadersSync === 'function'
+          ? (url, body, headers) => opts.httpPostBridge.postHeadersSync(url, body, headers)
+          : null);
+
+  // Headers use the same key<TAB>value, LF-separated wire format as the
+  // codec imports and the JVM host. It shares maxHttpPosts with http_post.
+  if (available.has('http-post-headers') && httpPostHeadersSync) {
+    fns.http_post_headers =
+      (urlPtr, urlLen, bodyPtr, bodyLen, headersPtr, headersLen, outPtr, outCap) => {
+        ensureGranted('http-post-headers');
+        if (overMemoryCap()) return -1;
+        if (state.httpPosts >= c.limits.maxHttpPosts) return -1;
+        const url = new TextDecoder().decode(readBytes(urlPtr, urlLen));
+        if (!urlAllowed(c.limits, url)) return -1;
+        const body = readBytes(bodyPtr, bodyLen);
+        const headerText = new TextDecoder().decode(readBytes(headersPtr, headersLen));
+        const headers = parseFlatPairs(headerText);
+        let resp;
+        try {
+          resp = httpPostHeadersSync(url, body, headers);
+        } catch (_) {
+          return -1;
+        }
+        if (resp == null) return -1;
+        const bytes = resp instanceof Uint8Array ? resp : utf8Encoder.encode(String(resp));
+        const n = writeBytes(outPtr, outCap, bytes);
+        if (n >= 0) state.httpPosts += 1;
+        return n;
+      };
   }
 
   // Codec imports -- pure computation, byte-for-byte ports of

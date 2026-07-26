@@ -69,6 +69,12 @@ check(
 
 const granted = validateImportSurface(['clock-monotonic', 'sha256-hex'], hostCaps({ grants: ['clock-monotonic', 'sha256-hex'] }));
 check(granted.ok === true, `clock-monotonic+sha256-hex granted and requested both pass validation (got ${JSON.stringify(granted.errors)})`);
+check(
+  IMPORT_SURFACE.length === 14 &&
+    IMPORT_SURFACE.some(({ id }) => id === 'http-fetch') &&
+    IMPORT_SURFACE.some(({ id }) => id === 'http-post-headers'),
+  'browser authority table covers all 14 JVM actor:host imports'
+);
 
 // ── validateImportSurface: the remaining four denial branches, previously
 // untested (only grants/missing and limit/secret-imports had coverage
@@ -92,6 +98,15 @@ const overMaxHttpPosts = validateImportSurface(['http-post'], hostCaps({ grants:
 check(
   overMaxHttpPosts.ok === false && overMaxHttpPosts.errors.some((e) => e.error === 'limit/max-http-posts'),
   `http-post granted but over maxHttpPosts:0 is limit/max-http-posts, distinct from grants/missing (got ${JSON.stringify(overMaxHttpPosts.errors)})`
+);
+const overMaxHttpFetches = validateImportSurface(
+  ['http-fetch'],
+  hostCaps({ grants: ['http-fetch'], limits: { maxHttpFetches: 0 } })
+);
+check(
+  overMaxHttpFetches.ok === false &&
+    overMaxHttpFetches.errors.some((e) => e.error === 'limit/max-http-fetches'),
+  `http-fetch has an independent deny-by-default quota (got ${JSON.stringify(overMaxHttpFetches.errors)})`
 );
 
 const writeDeniedByDefault = validateImportSurface(['log-write'], hostCaps({ grants: ['log-write'] }));
@@ -338,6 +353,67 @@ for (const { id } of IMPORT_SURFACE) {
     `llm_infer POSTs to opts.llmInferUrl via the bridge (got ${JSON.stringify(calls)})`);
   check(calls[0].body === 'hi', `the bridge receives the raw decoded prompt as the POST body (got ${JSON.stringify(calls[0]?.body)})`);
   check(reply === 'proxied:hi', `the bridge's reply is written back into guest memory (got ${JSON.stringify(reply)})`);
+}
+
+// ── remaining JVM parity: GET and POST-with-headers share policy,
+// transport, memory and lifecycle gates while preserving their exact ABI. ─
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  const put = (ptr, text) => {
+    const bytes = enc.encode(text);
+    new Uint8Array(memoryBox.memory.buffer, ptr, bytes.length).set(bytes);
+    return bytes.length;
+  };
+  const calls = [];
+  const authority = sessionAuthority(
+    ['http-fetch', 'http-post-headers'],
+    { 'http-fetch': 1, 'http-post-headers': 1 },
+  );
+  const fns = actorHostImports(
+    ['http-fetch', 'http-post-headers'],
+    hostCaps({
+      grants: ['http-fetch', 'http-post-headers'],
+      limits: {
+        maxHttpFetches: 1,
+        maxHttpPosts: 1,
+        allowedUrlPrefixes: ['https://api.example.test/'],
+      },
+    }),
+    memoryBox,
+    {
+      authority,
+      httpFetch: (url) => {
+        calls.push({ method: 'GET', url });
+        return enc.encode('fetched');
+      },
+      httpPostHeaders: (url, body, headers) => {
+        calls.push({ method: 'POST', url, body: dec.decode(body), headers });
+        return enc.encode('posted');
+      },
+    },
+  );
+  const getUrlLen = put(0, 'https://api.example.test/feed');
+  const fetched = fns.http_fetch(0, getUrlLen, 512, 32);
+  check(
+    fetched === 7 && dec.decode(new Uint8Array(memoryBox.memory.buffer, 512, fetched)) === 'fetched',
+    'http_fetch executes GET and writes its bounded response'
+  );
+  const postUrlLen = put(64, 'https://api.example.test/records');
+  const bodyLen = put(160, '{"ok":true}');
+  const headersLen = put(256, 'authorization\tBearer proof\ncontent-type\tapplication/json');
+  const posted = fns.http_post_headers(64, postUrlLen, 160, bodyLen, 256, headersLen, 544, 32);
+  check(
+    posted === 6 && calls[1].headers[0][0] === 'authorization' &&
+      calls[1].headers[0][1] === 'Bearer proof',
+    `http_post_headers preserves flat-pair headers (got ${JSON.stringify(calls[1])})`
+  );
+  check(
+    authority.snapshot().consumed.has('http-fetch') &&
+      authority.snapshot().consumed.has('http-post-headers'),
+    'both new browser imports consume their one-shot authority handles'
+  );
 }
 
 // ── maxMemoryPages: memoryPagesUsed/memoryWithinCap pure helpers ───────────
