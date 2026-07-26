@@ -10,7 +10,9 @@
 //   [1] response length (or -1)
 //   [2] url length
 //   [3] body length
-// Payload SAB: [url bytes][body bytes] then overwritten with [response bytes].
+//   [4] headers length
+//   [5] method: 0 POST | 1 GET | 2 POST with headers
+// Payload SAB: [url bytes][body bytes][headers bytes], then response bytes.
 //
 // Prefer opts.httpPost inject on Node/tests. Use this bridge only when a
 // real browser tab is cross-origin-isolated.
@@ -45,7 +47,7 @@ export async function createSabHttpPostBridge(opts = {}) {
 
   const payloadBytes = opts.payloadBytes || DEFAULT_PAYLOAD_BYTES;
   const timeoutMs = opts.timeoutMs || 30000;
-  const ctrlSab = new SharedArrayBuffer(16);
+  const ctrlSab = new SharedArrayBuffer(24);
   const payloadSab = new SharedArrayBuffer(payloadBytes);
   const ctrl = new Int32Array(ctrlSab);
   const payload = new Uint8Array(payloadSab);
@@ -69,17 +71,28 @@ export async function createSabHttpPostBridge(opts = {}) {
           try {
             const urlLen = Atomics.load(ctrl, 2);
             const bodyLen = Atomics.load(ctrl, 3);
+            const headersLen = Atomics.load(ctrl, 4);
+            const methodId = Atomics.load(ctrl, 5);
             // .slice (not .subarray) -- TextDecoder.decode() throws
             // "The provided ArrayBufferView value must not be shared" on a
             // view backed directly by a SharedArrayBuffer (confirmed live);
             // .slice() copies into a fresh, non-shared ArrayBuffer first.
             const url = new TextDecoder().decode(payload.slice(0, urlLen));
             const body = payload.slice(urlLen, urlLen + bodyLen);
-            const resp = await fetch(url, {
-              method: 'POST',
-              body,
-              headers: { 'content-type': 'application/octet-stream' },
-            });
+            const headerStart = urlLen + bodyLen;
+            const headerText = new TextDecoder().decode(
+              payload.slice(headerStart, headerStart + headersLen)
+            );
+            const headers = methodId === 2
+              ? Object.fromEntries(headerText.split('\\n').filter(Boolean).map((line) => {
+                  const tab = line.indexOf('\\t');
+                  return tab < 0 ? [line, ''] : [line.slice(0, tab), line.slice(tab + 1)];
+                }))
+              : { 'content-type': 'application/octet-stream' };
+            const init = methodId === 1
+              ? { method: 'GET' }
+              : { method: 'POST', body, headers };
+            const resp = await fetch(url, init);
             const buf = new Uint8Array(await resp.arrayBuffer());
             const n = Math.min(buf.length, payload.length);
             payload.set(buf.subarray(0, n), 0);
@@ -119,11 +132,12 @@ export async function createSabHttpPostBridge(opts = {}) {
     worker.postMessage({ ctrlSab, payloadSab });
   });
 
-  function postSync(urlStr, body) {
+  function requestSync(methodId, urlStr, body, headers = '') {
     const urlBytes = new TextEncoder().encode(String(urlStr));
     const bodyBytes =
       body instanceof Uint8Array ? body : new TextEncoder().encode(String(body || ''));
-    if (urlBytes.length + bodyBytes.length > payload.length) return null;
+    const headerBytes = new TextEncoder().encode(String(headers || ''));
+    if (urlBytes.length + bodyBytes.length + headerBytes.length > payload.length) return null;
 
     // Wait for idle
     let s = Atomics.load(ctrl, 0);
@@ -135,8 +149,11 @@ export async function createSabHttpPostBridge(opts = {}) {
     payload.fill(0);
     payload.set(urlBytes, 0);
     payload.set(bodyBytes, urlBytes.length);
+    payload.set(headerBytes, urlBytes.length + bodyBytes.length);
     Atomics.store(ctrl, 2, urlBytes.length);
     Atomics.store(ctrl, 3, bodyBytes.length);
+    Atomics.store(ctrl, 4, headerBytes.length);
+    Atomics.store(ctrl, 5, methodId);
     Atomics.store(ctrl, 1, 0);
     Atomics.store(ctrl, 0, STATUS_PENDING);
     Atomics.notify(ctrl, 0);
@@ -153,8 +170,19 @@ export async function createSabHttpPostBridge(opts = {}) {
     return payload.slice(0, n);
   }
 
+  const postSync = (urlStr, body) => requestSync(0, urlStr, body);
+  const getSync = (urlStr) => requestSync(1, urlStr, new Uint8Array());
+  const postHeadersSync = (urlStr, body, headers) => {
+    const text = Array.isArray(headers)
+      ? headers.map(([name, value]) => `${name}\t${value}`).join('\n')
+      : String(headers || '');
+    return requestSync(2, urlStr, body, text);
+  };
+
   return {
     postSync,
+    getSync,
+    postHeadersSync,
     dispose() {
       try {
         worker.terminate();

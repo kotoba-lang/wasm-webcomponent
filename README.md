@@ -66,8 +66,9 @@ browser/Node-native implementation of `kototama.contract`'s HostCaps/
 RuntimeLimits — `tender` is a host-language-independent role, not a JVM
 concept; this is an independent, non-JVM implementation of that role
 alongside `kotoba-lang/kototama`'s JVM/Chicory `kototama.tender`, not a
-port derived from it. It does not cover the full capability surface of
-the JVM implementation — see "Scope" below):
+port derived from it. Its authority table and host functions cover all
+14 contract imports; network imports require an inject or SAB bridge —
+see "Scope" below):
 
 ```js
 import { KotobaWasmElement } from './src/kotoba-wasm-element.js';
@@ -153,14 +154,15 @@ KotobaWasmElement.define('my-actor-host-demo', {
   `kotoba-lang/kototama`'s JVM/Chicory `kototama.tender` implements —
   `tender` names a host-language-independent role, not a JVM-specific
   concept; see ADR-2607183010). Unconditionally sync: clock / sha256 /
-  gen-keypair / sign / verify / log-*. Conditional: `llm-infer`
-  (`opts.llmInfer`), **`http-post`** (`opts.httpPost` inject, or
-  `opts.httpPostBridge` SAB+COOP via `http-post-bridge.js`). JSPI is
-  detected (`httpPostCapabilities`) but not the default wire. This is not
-  full capability parity with the JVM/Chicory implementation: `llm-infer`
-  has no in-browser inference path (Node-inject only) and `http-post` has
-  no fully-synchronous default (no synchronous `fetch`) — see "Scope"
-  below for the complete honest gap list. See `test/verify-http-post.mjs`
+  gen-keypair / sign / verify / log-* / codecs. Conditional:
+  **`llm-infer`**, **`http-fetch`**, **`http-post-headers`**, and
+  **`http-post`** (inject, or the shared `opts.httpPostBridge` SAB+COOP
+  transport from `http-post-bridge.js`). JSPI is
+  detected (`httpPostCapabilities`) but not the default wire. All 14 JVM
+  contract imports now share the same browser session authority,
+  one-shot/revoke/drop lifecycle, memory gate and quotas. Network effects
+  deliberately have no ambient synchronous default — see "Scope" below.
+  See `test/verify-http-post.mjs`
   + `examples/http-post-echo.wasm`.
 - `src/vendor/` — the actual, unmodified `@noble/curves`/`@noble/hashes`
   source files `actor-host.js`'s ed25519 imports need, copied file-for-file
@@ -509,13 +511,15 @@ silently.
 
 ## Scope (honest R2 advanced-partial)
 
-- **`kgraph-*`, `has_capability`, and actor:host** (sync subset + conditional
-  network). **`http-post`** is available via (1) `opts.httpPost` inject
+- **`kgraph-*`, `has_capability`, and actor:host** (14/14 contract imports,
+  with conditional network transports). `http-post`, `http-fetch`,
+  `http-post-headers`, and `llm-infer` are available via inject or the
+  shared SAB+COOP bridge. **`http-post`** is available via (1) `opts.httpPost` inject
   (Node/tests), (2) SAB+COOP bridge (`createSabHttpPostBridge`, needs
   `crossOriginIsolated`), (3) JSPI experimental detection only. Without a
   path, `http_post` is absent from the import object (clear link error).
-  `llm-infer` remains Node-inject only. Wider `kse`/`auth`/`evm`/… surfaces
-  are not ported.
+  Wider `kse`/`auth`/`evm`/… surfaces are outside the `actor:host`
+  contract and are not ported.
 - **`has-capability.js` re-states a policy at load time, it doesn't
   re-derive one.** The granted-capabilities list you pass to
   `hasCapabilityHostImport` is trusted input from the page author, not

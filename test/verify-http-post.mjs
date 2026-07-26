@@ -80,7 +80,7 @@ check(bare.http_post === undefined, 'http_post absent without inject/bridge');
 // urlAllowed: unrestricted by default, prefix-matched when set
 check(urlAllowed({}, 'http://anything.example/x') === true, 'urlAllowed: no allowedUrlPrefixes -- unrestricted');
 check(urlAllowed({ allowedUrlPrefixes: null }, 'http://anything.example/x') === true, 'urlAllowed: null -- unrestricted');
-check(urlAllowed({ allowedUrlPrefixes: [] }, 'http://anything.example/x') === true, 'urlAllowed: [] -- unrestricted');
+check(urlAllowed({ allowedUrlPrefixes: [] }, 'http://anything.example/x') === false, 'urlAllowed: [] -- explicit deny-all');
 check(
   urlAllowed({ allowedUrlPrefixes: ['http://example.test/'] }, 'http://example.test/echo') === true,
   'urlAllowed: matching prefix -- allowed',
