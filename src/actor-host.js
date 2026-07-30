@@ -87,6 +87,10 @@ export const IMPORT_SURFACE = [
   { id: 'log-read', category: 'storage', effects: new Set(['storage']) },
   { id: 'log-write', category: 'storage', effects: new Set(['storage', 'write']) },
   { id: 'clock-monotonic', category: 'clock', effects: new Set(['clock']) },
+  // Bounded OS/Web Crypto CSPRNG fill (host-parity L5 / kototama tender
+  // `:random-bytes`). Default `maxRandomBytes` is 0 — deny-by-default until
+  // HostCaps raises the quota (same pattern as maxHttpPosts / maxLlmInfers).
+  { id: 'random-bytes', category: 'randomness', effects: new Set(['crypto', 'write']) },
   // `llm-infer` (`llm/infer`, capability id 225 in kotoba-core-contracts'
   // capability_contract.edn; kototama.tender's Anthropic Messages API
   // call). Unlike `http-post`, this ISN'T fundamentally un-implementable
@@ -119,6 +123,9 @@ export const DEFAULT_RUNTIME_LIMITS = {
   maxHttpPosts: 0,
   maxHttpFetches: 0,
   maxLlmInfers: 0,
+  // CSPRNG fill quota (bytes). Default 0 = deny-by-default until raised
+  // (matches kototama.contract `:max-random-bytes` 0).
+  maxRandomBytes: 0,
   maxLogReadBytes: 1048576,
   maxLogWriteBytes: 65536,
   // 16 Wasm pages (64 KiB/page) = 1 MiB -- same value and rationale as
@@ -599,7 +606,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
 
   const store = opts.store || inMemoryStore();
   const state = {
-    logReadBytes: 0, logWriteBytes: 0, httpPosts: 0, httpFetches: 0, llmInfers: 0,
+    logReadBytes: 0, logWriteBytes: 0, randomBytes: 0, httpPosts: 0, httpFetches: 0, llmInfers: 0,
   };
   const available = new Set(validation.requested);
   const authority = opts.authority || sessionAuthority(c.grants);
@@ -629,6 +636,27 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
     fns.clock_monotonic = () => {
       ensureGranted('clock-monotonic');
       return BigInt(Date.now());
+    };
+  }
+
+  // `(out-ptr out-cap) -> bytes-written|-1`. Fills out-cap random bytes via
+  // Web Crypto CSPRNG (or opts.randomBytes for deterministic tests).
+  // `#{crypto, write}` — requires grant + allowWriteImports and is metered
+  // against maxRandomBytes (default 0 = deny). Caps single fill at 4096.
+  if (available.has('random-bytes')) {
+    fns.random_bytes = (outPtr, outCap) => {
+      ensureGranted('random-bytes');
+      if (outCap <= 0 || outCap > 4096 || state.randomBytes + outCap > c.limits.maxRandomBytes) return -1;
+      const bytes = new Uint8Array(outCap);
+      if (typeof opts.randomBytes === 'function') {
+        const supplied = opts.randomBytes(outCap);
+        if (!(supplied instanceof Uint8Array) || supplied.length !== outCap) return -1;
+        bytes.set(supplied);
+      } else {
+        globalThis.crypto.getRandomValues(bytes);
+      }
+      state.randomBytes += outCap;
+      return writeBytes(outPtr, outCap, bytes);
     };
   }
 
