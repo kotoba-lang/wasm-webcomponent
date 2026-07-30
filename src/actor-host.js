@@ -91,6 +91,11 @@ export const IMPORT_SURFACE = [
   // `:random-bytes`). Default `maxRandomBytes` is 0 — deny-by-default until
   // HostCaps raises the quota (same pattern as maxHttpPosts / maxLlmInfers).
   { id: 'random-bytes', category: 'randomness', effects: new Set(['crypto', 'write']) },
+  // Decision-aware trusted-adapter sign (host-parity L5 / T8.4).
+  // Key never enters the guest; default maxKagiSigns 0 deny-by-default.
+  // Node-only inject via opts.kagiSigner + opts.kagiDecisions; browser
+  // intentional absence (native boundary).
+  { id: 'kagi-sign', category: 'identity', effects: new Set(['crypto']) },
   // `llm-infer` (`llm/infer`, capability id 225 in kotoba-core-contracts'
   // capability_contract.edn; kototama.tender's Anthropic Messages API
   // call). Unlike `http-post`, this ISN'T fundamentally un-implementable
@@ -123,6 +128,8 @@ export const DEFAULT_RUNTIME_LIMITS = {
   maxHttpPosts: 0,
   maxHttpFetches: 0,
   maxLlmInfers: 0,
+  // Finite kagi-sign invocation quota. Default 0 = deny-by-default.
+  maxKagiSigns: 0,
   // CSPRNG fill quota (bytes). Default 0 = deny-by-default until raised
   // (matches kototama.contract `:max-random-bytes` 0).
   maxRandomBytes: 0,
@@ -256,6 +263,10 @@ export function validateImportSurface(requestedIds, caps) {
   const llmInfers = known.filter((id) => id === 'llm-infer').length;
   if (llmInfers > c.limits.maxLlmInfers) {
     errors.push({ error: 'limit/max-llm-infers', limit: c.limits.maxLlmInfers, actual: llmInfers });
+  }
+  const kagiSigns = known.filter((id) => id === 'kagi-sign').length;
+  if (kagiSigns > c.limits.maxKagiSigns) {
+    errors.push({ error: 'limit/max-kagi-signs', limit: c.limits.maxKagiSigns, actual: kagiSigns });
   }
   const secretImports = known.filter((id) => IMPORT_BY_ID.get(id).effects.has('secret'));
   if (!c.limits.allowSecretImports && secretImports.length) {
@@ -606,7 +617,8 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
 
   const store = opts.store || inMemoryStore();
   const state = {
-    logReadBytes: 0, logWriteBytes: 0, randomBytes: 0, httpPosts: 0, httpFetches: 0, llmInfers: 0,
+    logReadBytes: 0, logWriteBytes: 0, randomBytes: 0, httpPosts: 0, httpFetches: 0,
+    llmInfers: 0, kagiSigns: 0,
   };
   const available = new Set(validation.requested);
   const authority = opts.authority || sessionAuthority(c.grants);
@@ -666,6 +678,32 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       if (overMemoryCap()) return -1;
       const hex = sha256Hex(readBytes(ptr, len));
       return writeBytes(outPtr, outCap, new TextEncoder().encode(hex));
+    };
+  }
+
+  // `(ref-ptr ref-len msg-ptr msg-len out-ptr out-cap) -> written|-1`.
+  // Decision-aware trusted adapter only — links when opts.runtime === 'node'
+  // and opts.kagiSigner.authorizedSign + non-empty opts.kagiDecisions are set.
+  // Key never enters the guest; default maxKagiSigns 0 deny-by-default.
+  if (available.has('kagi-sign') && opts.runtime === 'node'
+      && typeof opts.kagiSigner?.authorizedSign === 'function'
+      && Array.isArray(opts.kagiDecisions) && opts.kagiDecisions.length > 0) {
+    fns.kagi_sign = (refPtr, refLen, msgPtr, msgLen, outPtr, outCap) => {
+      ensureGranted('kagi-sign');
+      if (state.kagiSigns >= c.limits.maxKagiSigns
+          || refLen <= 0 || refLen > 255
+          || msgLen < 0 || msgLen > 65536) return -1;
+      try {
+        const ref = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(refPtr, refLen));
+        const signature = opts.kagiSigner.authorizedSign(
+          opts.kagiDecisions, ref, readBytes(msgPtr, msgLen));
+        if (!(signature instanceof Uint8Array)) return -1;
+        const written = writeBytes(outPtr, outCap, signature);
+        if (written >= 0) state.kagiSigns += 1;
+        return written;
+      } catch (_) {
+        return -1;
+      }
     };
   }
 
