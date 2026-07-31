@@ -119,6 +119,16 @@ export const IMPORT_SURFACE = [
   { id: 'json-encode', category: 'codec', effects: new Set() },
   { id: 'json-extract-field', category: 'codec', effects: new Set() },
   { id: 'http-post-headers', category: 'network', effects: new Set(['network']) },
+  // Transport/TLS (T8.4 Node inject path). Browser intentional absence —
+  // native boundary (same honesty as kagi-sign). Node wires fail-closed
+  // defaults and optional opts.transportProvider overrides; no real sockets
+  // unless a provider inject is supplied. Matches kototama.guest field names.
+  { id: 'transport-connect', category: 'network', effects: new Set(['network']) },
+  { id: 'tls-open', category: 'network', effects: new Set(['network']) },
+  { id: 'tls-server-end-point', category: 'network', effects: new Set(['network']) },
+  { id: 'transport-write', category: 'network', effects: new Set(['network']) },
+  { id: 'transport-read', category: 'network', effects: new Set(['network']) },
+  { id: 'transport-close', category: 'network', effects: new Set(['network']) },
 ];
 
 const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
@@ -133,6 +143,9 @@ export const DEFAULT_RUNTIME_LIMITS = {
   // CSPRNG fill quota (bytes). Default 0 = deny-by-default until raised
   // (matches kototama.contract `:max-random-bytes` 0).
   maxRandomBytes: 0,
+  // Transport inject quota (handles). Default 0 = deny-by-default until
+  // HostCaps raises it (same pattern as maxHttpPosts / maxKagiSigns).
+  maxTransportConnections: 0,
   maxLogReadBytes: 1048576,
   maxLogWriteBytes: 65536,
   // 16 Wasm pages (64 KiB/page) = 1 MiB -- same value and rationale as
@@ -267,6 +280,14 @@ export function validateImportSurface(requestedIds, caps) {
   const kagiSigns = known.filter((id) => id === 'kagi-sign').length;
   if (kagiSigns > c.limits.maxKagiSigns) {
     errors.push({ error: 'limit/max-kagi-signs', limit: c.limits.maxKagiSigns, actual: kagiSigns });
+  }
+  const transportConnects = known.filter((id) => id === 'transport-connect').length;
+  if (transportConnects > c.limits.maxTransportConnections) {
+    errors.push({
+      error: 'limit/max-transport-connections',
+      limit: c.limits.maxTransportConnections,
+      actual: transportConnects,
+    });
   }
   const secretImports = known.filter((id) => IMPORT_BY_ID.get(id).effects.has('secret'));
   if (!c.limits.allowSecretImports && secretImports.length) {
@@ -706,6 +727,119 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       }
     };
   }
+
+  // ── Transport/TLS Node inject (T8.4) ─────────────────────────────────
+  // Browser: intentional absence (native boundary). Node: fail-closed
+  // defaults that never open sockets; opts.transportProvider may override
+  // individual methods. Handles are BigInt; 0n means deny/missing.
+  // Quota: maxTransportConnections (default 0 deny-by-default).
+  if (opts.runtime === 'node') {
+    const tp = opts.transportProvider || {};
+    const transportState = { nextHandle: 1n, open: new Set() };
+    const takeHandle = () => {
+      if (transportState.open.size >= c.limits.maxTransportConnections) return 0n;
+      const h = transportState.nextHandle;
+      transportState.nextHandle += 1n;
+      transportState.open.add(h);
+      return h;
+    };
+    if (available.has('transport-connect')) {
+      fns.transport_connect = (hostPtr, hostLen, port) => {
+        ensureGranted('transport-connect');
+        if (overMemoryCap()) return 0n;
+        if (hostLen <= 0 || hostLen > 255 || port < 0 || port > 65535) return 0n;
+        if (typeof tp.connect === 'function') {
+          try {
+            const host = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(hostPtr, hostLen));
+            const h = tp.connect(host, port | 0);
+            return typeof h === 'bigint' ? h : BigInt(h || 0);
+          } catch (_) {
+            return 0n;
+          }
+        }
+        // Fail-closed default: no real socket; empty allowlist semantics → 0.
+        return 0n;
+      };
+    }
+    if (available.has('tls-open')) {
+      fns.tls_open = (handle, namePtr, nameLen) => {
+        ensureGranted('tls-open');
+        if (overMemoryCap()) return 0n;
+        if (typeof tp.tlsOpen === 'function') {
+          try {
+            const name = nameLen > 0
+              ? new TextDecoder('utf-8', { fatal: true }).decode(readBytes(namePtr, nameLen))
+              : '';
+            const h = tp.tlsOpen(handle, name);
+            return typeof h === 'bigint' ? h : BigInt(h || 0);
+          } catch (_) {
+            return 0n;
+          }
+        }
+        // Invalid/unknown TCP handle → 0 (match JVM inject fail-closed).
+        return 0n;
+      };
+    }
+    if (available.has('tls-server-end-point')) {
+      fns.tls_server_end_point = (handle, outPtr, outCap) => {
+        ensureGranted('tls-server-end-point');
+        if (overMemoryCap()) return -1;
+        if (typeof tp.tlsServerEndPoint === 'function') {
+          try {
+            return tp.tlsServerEndPoint(handle, outPtr, outCap, { writeBytes, readBytes }) | 0;
+          } catch (_) {
+            return -1;
+          }
+        }
+        return -1;
+      };
+    }
+    if (available.has('transport-write')) {
+      fns.transport_write = (handle, ptr, len) => {
+        ensureGranted('transport-write');
+        if (overMemoryCap()) return -1;
+        if (typeof tp.write === 'function') {
+          try {
+            return tp.write(handle, readBytes(ptr, len)) | 0;
+          } catch (_) {
+            return -1;
+          }
+        }
+        return -1;
+      };
+    }
+    if (available.has('transport-read')) {
+      fns.transport_read = (handle, ptr, cap) => {
+        ensureGranted('transport-read');
+        if (overMemoryCap()) return -1;
+        if (typeof tp.read === 'function') {
+          try {
+            const bytes = tp.read(handle, cap);
+            if (!(bytes instanceof Uint8Array)) return -1;
+            return writeBytes(ptr, cap, bytes);
+          } catch (_) {
+            return -1;
+          }
+        }
+        return -1;
+      };
+    }
+    if (available.has('transport-close')) {
+      fns.transport_close = (handle) => {
+        ensureGranted('transport-close');
+        if (typeof tp.close === 'function') {
+          try {
+            return tp.close(handle) | 0;
+          } catch (_) {
+            return -1;
+          }
+        }
+        // Unknown handle → -1 (match JVM inject).
+        return -1;
+      };
+    }
+  }
+
 
   // `(out-ptr out-cap) -> bytes-written|-1`. Writes a fresh 32-byte Ed25519
   // seed followed by its 32-byte derived public key (64 bytes total) --

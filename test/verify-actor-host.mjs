@@ -70,10 +70,12 @@ check(
 const granted = validateImportSurface(['clock-monotonic', 'sha256-hex'], hostCaps({ grants: ['clock-monotonic', 'sha256-hex'] }));
 check(granted.ok === true, `clock-monotonic+sha256-hex granted and requested both pass validation (got ${JSON.stringify(granted.errors)})`);
 check(
-  IMPORT_SURFACE.length === 14 &&
+  IMPORT_SURFACE.length === 22 &&
     IMPORT_SURFACE.some(({ id }) => id === 'http-fetch') &&
-    IMPORT_SURFACE.some(({ id }) => id === 'http-post-headers'),
-  'browser authority table covers all 14 JVM actor:host imports'
+    IMPORT_SURFACE.some(({ id }) => id === 'http-post-headers') &&
+    IMPORT_SURFACE.some(({ id }) => id === 'transport-connect') &&
+    IMPORT_SURFACE.some(({ id }) => id === 'transport-close'),
+  'browser authority table covers codec/network + transport surface (22 imports)'
 );
 
 // ── validateImportSurface: the remaining four denial branches, previously
@@ -473,6 +475,72 @@ for (const { id } of IMPORT_SURFACE) {
   );
   const result = fns.sha256_hex(0, 0, 100, 64);
   check(result >= 0, `sha256_hex succeeds at 21 pages once maxMemoryPages is explicitly raised to 32 (got ${result})`);
+}
+
+
+// ── T8.4 Node transport inject fail-closed ─────────────────────────────
+{
+  const denied = validateImportSurface(
+    ['transport-connect'],
+    hostCaps({ grants: ['transport-connect'] }),
+  );
+  check(
+    denied.ok === false &&
+      denied.errors.some((e) => e.error === 'limit/max-transport-connections'),
+    'transport-connect denied under maxTransportConnections 0 (deny-by-default)',
+  );
+
+  const okSurf = validateImportSurface(
+    ['transport-connect', 'transport-close', 'tls-open', 'transport-write', 'transport-read'],
+    hostCaps({
+      grants: ['transport-connect', 'transport-close', 'tls-open', 'transport-write', 'transport-read'],
+      limits: { maxTransportConnections: 2 },
+    }),
+  );
+  check(okSurf.ok === true, `transport surface validates when quota raised (got ${JSON.stringify(okSurf.errors)})`);
+
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const imports = actorHostImports(
+    ['transport-connect', 'transport-close', 'tls-open', 'transport-write', 'transport-read', 'tls-server-end-point'],
+    hostCaps({
+      grants: [
+        'transport-connect', 'transport-close', 'tls-open',
+        'transport-write', 'transport-read', 'tls-server-end-point',
+      ],
+      limits: { maxTransportConnections: 2 },
+    }),
+    memoryBox,
+    { runtime: 'node' },
+  );
+  const kotoba = imports.kotoba || imports;
+  check(typeof kotoba.transport_connect === 'function', 'Node wires transport_connect');
+  check(typeof kotoba.transport_close === 'function', 'Node wires transport_close');
+  check(typeof kotoba.tls_open === 'function', 'Node wires tls_open');
+  // fail-closed: empty allowlist semantics → handle 0
+  const enc = new TextEncoder();
+  const host = enc.encode('example.com');
+  new Uint8Array(memoryBox.memory.buffer, 0, host.length).set(host);
+  const h = kotoba.transport_connect(0, host.length, 443);
+  check(h === 0n || h === 0, `fail-closed transport_connect returns 0 (got ${h})`);
+  const tls = kotoba.tls_open(0n, 0, 0);
+  check(tls === 0n || tls === 0, `fail-closed tls_open returns 0 (got ${tls})`);
+  check(kotoba.transport_write(0n, 0, 0) === -1, 'fail-closed transport_write returns -1');
+  check(kotoba.transport_read(0n, 0, 8) === -1, 'fail-closed transport_read returns -1');
+  check(kotoba.transport_close(0n) === -1, 'fail-closed transport_close returns -1');
+  check(kotoba.tls_server_end_point(0n, 0, 8) === -1, 'fail-closed tls_server_end_point returns -1');
+
+  // browser runtime does NOT wire transport
+  const browserImports = actorHostImports(
+    ['transport-connect'],
+    hostCaps({
+      grants: ['transport-connect'],
+      limits: { maxTransportConnections: 1 },
+    }),
+    memoryBox,
+    { runtime: 'browser' },
+  );
+  const b = browserImports.kotoba || browserImports;
+  check(typeof b.transport_connect !== 'function', 'browser does not wire transport_connect');
 }
 
 if (failed) process.exit(1);
