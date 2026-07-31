@@ -129,6 +129,23 @@ export const IMPORT_SURFACE = [
   { id: 'transport-write', category: 'network', effects: new Set(['network']) },
   { id: 'transport-read', category: 'network', effects: new Set(['network']) },
   { id: 'transport-close', category: 'network', effects: new Set(['network']) },
+  // PostgreSQL pool / wire / cancel / SCRAM (T8.4 Node inject). Browser
+  // intentional absence. Node: fail-closed defaults; optional
+  // opts.pgPoolProvider / opts.pgWireProvider / opts.scramCredentials.
+  { id: 'pg-pool-open', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-acquire', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-query', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-pool-release', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-stats', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-health', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-drain', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-close', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-open', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-query', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-simple-query', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-cancel-register', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-cancel', category: 'network', effects: new Set(['network']) },
+  { id: 'scram-sha256', category: 'secret', effects: new Set(['secret']) },
 ];
 
 const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
@@ -839,6 +856,250 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       };
     }
   }
+
+  // ── PostgreSQL pool / wire / cancel / SCRAM Node inject (T8.4) ─────
+  // Browser: intentional absence. Node: fail-closed defaults (no real PG);
+  // optional opts.pgPoolProvider / opts.pgWireProvider / opts.scramCredentials.
+  if (opts.runtime === 'node') {
+    const poolP = opts.pgPoolProvider || {};
+    const wireP = opts.pgWireProvider || {};
+    const denyI32 = () => -1;
+    const denyI64 = () => 0n;
+
+    const wirePool = (id, field, impl) => {
+      if (!available.has(id)) return;
+      fns[field] = (...args) => {
+        ensureGranted(id);
+        if (overMemoryCap()) return field.includes('open') && !field.includes('pool') ? 0n : -1;
+        try {
+          return impl(...args);
+        } catch (_) {
+          return field === 'pg_open' ? 0n : -1;
+        }
+      };
+    };
+
+    // Pool — i32 handles; fail-closed unknown → -1; open → -1 (no SCRAM/PG).
+    if (available.has('pg-pool-open')) {
+      fns.pg_pool_open = (hPtr, hLen, port, uPtr, uLen, dPtr, dLen, cPtr, cLen) => {
+        ensureGranted('pg-pool-open');
+        if (overMemoryCap()) return -1;
+        if (typeof poolP.open === 'function') {
+          try {
+            return poolP.open({
+              host: new TextDecoder().decode(readBytes(hPtr, hLen)),
+              port: port | 0,
+              user: new TextDecoder().decode(readBytes(uPtr, uLen)),
+              database: new TextDecoder().decode(readBytes(dPtr, dLen)),
+              credential: new TextDecoder().decode(readBytes(cPtr, cLen)),
+            }) | 0;
+          } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-acquire')) {
+      fns.pg_pool_acquire = (poolId) => {
+        ensureGranted('pg-pool-acquire');
+        if (typeof poolP.acquire === 'function') {
+          try { return poolP.acquire(poolId | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-query')) {
+      fns.pg_pool_query = (lease, qPtr, qLen, pPtr, pCap, oPtr, oCap) => {
+        ensureGranted('pg-pool-query');
+        if (overMemoryCap()) return -1;
+        if (typeof poolP.query === 'function') {
+          try {
+            return poolP.query(lease | 0, readBytes(qPtr, qLen), pPtr, pCap, oPtr, oCap) | 0;
+          } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-release')) {
+      fns.pg_pool_release = (lease) => {
+        ensureGranted('pg-pool-release');
+        if (typeof poolP.release === 'function') {
+          try { return poolP.release(lease | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-stats')) {
+      fns.pg_pool_stats = (poolId, outPtr, outCap) => {
+        ensureGranted('pg-pool-stats');
+        if (overMemoryCap()) return -1;
+        if (typeof poolP.stats === 'function') {
+          try { return poolP.stats(poolId | 0, outPtr, outCap) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-health')) {
+      fns.pg_pool_health = (poolId) => {
+        ensureGranted('pg-pool-health');
+        if (typeof poolP.health === 'function') {
+          try { return poolP.health(poolId | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-drain')) {
+      fns.pg_pool_drain = (poolId) => {
+        ensureGranted('pg-pool-drain');
+        if (typeof poolP.drain === 'function') {
+          try { return poolP.drain(poolId | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-close')) {
+      fns.pg_pool_close = (poolId) => {
+        ensureGranted('pg-pool-close');
+        if (typeof poolP.close === 'function') {
+          try { return poolP.close(poolId | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+
+    // Wire — handle 0 / -1 fail-closed.
+    if (available.has('pg-open')) {
+      fns.pg_open = (hPtr, hLen, port, uPtr, uLen, dPtr, dLen) => {
+        ensureGranted('pg-open');
+        if (overMemoryCap()) return 0n;
+        if (typeof wireP.open === 'function') {
+          try {
+            const h = wireP.open({
+              host: new TextDecoder().decode(readBytes(hPtr, hLen)),
+              port: port | 0,
+              user: new TextDecoder().decode(readBytes(uPtr, uLen)),
+              database: new TextDecoder().decode(readBytes(dPtr, dLen)),
+            });
+            return typeof h === 'bigint' ? h : BigInt(h || 0);
+          } catch (_) { return 0n; }
+        }
+        return 0n;
+      };
+    }
+    if (available.has('pg-query')) {
+      fns.pg_query = (handle, qPtr, qLen, oPtr, oCap) => {
+        ensureGranted('pg-query');
+        if (overMemoryCap()) return -1;
+        if (typeof wireP.query === 'function') {
+          try { return wireP.query(handle, readBytes(qPtr, qLen), oPtr, oCap) | 0; }
+          catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-simple-query')) {
+      fns.pg_simple_query = (_a, _b, _c, _d, _e, _f, _g) => {
+        ensureGranted('pg-simple-query');
+        if (overMemoryCap()) return -1;
+        if (typeof wireP.simpleQuery === 'function') {
+          try { return wireP.simpleQuery(_a, _b, _c, _d, _e, _f, _g) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+
+    // Cancel
+    if (available.has('pg-cancel-register')) {
+      fns.pg_cancel_register = (handle, a, b) => {
+        ensureGranted('pg-cancel-register');
+        if (typeof opts.pgCancelRegister === 'function') {
+          try { return opts.pgCancelRegister(handle, a, b) | 0; } catch (_) { return 0; }
+        }
+        // non-TLS handle → 0
+        return 0;
+      };
+    }
+    if (available.has('pg-cancel')) {
+      fns.pg_cancel = (handle) => {
+        ensureGranted('pg-cancel');
+        if (typeof opts.pgCancel === 'function') {
+          try { return opts.pgCancel(handle | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+
+    // SCRAM-SHA-256 purpose-bound host crypto (Node).
+    // Password never enters guest; opts.scramCredentials is ref→password map
+    // (or getter), opts.scramCredentialAllowlist is a Set of allowed refs.
+    // Fail-closed -1 without credentials/allowlist (match JVM deny path).
+    if (available.has('scram-sha256')) {
+      fns.scram_sha256 = (
+        refPtr, refLen, saltPtr, saltLen, iterations,
+        authPtr, authLen, outPtr, outCap,
+      ) => {
+        ensureGranted('scram-sha256');
+        if (overMemoryCap()) return -1;
+        if (outCap < 64 || refLen <= 0 || refLen > 255
+            || saltLen <= 0 || saltLen > 1024
+            || iterations < 4096 || iterations > 1000000
+            || authLen <= 0 || authLen > 8192) return -1;
+        let ref;
+        try {
+          ref = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(refPtr, refLen));
+        } catch (_) { return -1; }
+        const allow = opts.scramCredentialAllowlist;
+        if (!(allow instanceof Set) || !allow.has(ref)) return -1;
+        let creds = opts.scramCredentials;
+        if (typeof creds === 'function') {
+          try { creds = creds(); } catch (_) { return -1; }
+        }
+        const secret = creds && creds[ref];
+        if (secret == null || secret === '') return -1;
+        // Node crypto SCRAM-SHA-256 client-proof || server-signature (64 bytes)
+        try {
+          // dynamic import not available sync; use globalThis.crypto.subtle is async.
+          // Prefer node:crypto when available via createRequire pattern is heavy;
+          // use opts.scramProve inject for success path, else compute via WebCrypto sync? No.
+          // Node 19+ has global crypto with subtle async only.
+          // Use createHmac/pbkdf2Sync from node:crypto via process.getBuiltinModule if present.
+          const nodeCrypto = (typeof process !== 'undefined' && process.getBuiltinModule)
+            ? process.getBuiltinModule('crypto')
+            : null;
+          if (!nodeCrypto || typeof nodeCrypto.pbkdf2Sync !== 'function') {
+            if (typeof opts.scramProve === 'function') {
+              const proof = opts.scramProve({
+                ref,
+                password: String(secret),
+                salt: readBytes(saltPtr, saltLen),
+                iterations: iterations | 0,
+                authMessage: readBytes(authPtr, authLen),
+              });
+              if (!(proof instanceof Uint8Array) || proof.length !== 64) return -1;
+              return writeBytes(outPtr, outCap, proof);
+            }
+            return -1;
+          }
+          const password = String(secret);
+          const salt = Buffer.from(readBytes(saltPtr, saltLen));
+          const authMessage = Buffer.from(readBytes(authPtr, authLen));
+          const salted = nodeCrypto.pbkdf2Sync(password, salt, iterations | 0, 32, 'sha256');
+          const hmac = (key, data) => nodeCrypto.createHmac('sha256', key).update(data).digest();
+          const clientKey = hmac(salted, 'Client Key');
+          const storedKey = nodeCrypto.createHash('sha256').update(clientKey).digest();
+          const clientSignature = hmac(storedKey, authMessage);
+          const clientProof = Buffer.alloc(32);
+          for (let i = 0; i < 32; i++) clientProof[i] = clientKey[i] ^ clientSignature[i];
+          const serverKey = hmac(salted, 'Server Key');
+          const serverSignature = hmac(serverKey, authMessage);
+          const out = Buffer.concat([clientProof, serverSignature]);
+          return writeBytes(outPtr, outCap, new Uint8Array(out));
+        } catch (_) {
+          return -1;
+        }
+      };
+    }
+  }
+
 
 
   // `(out-ptr out-cap) -> bytes-written|-1`. Writes a fresh 32-byte Ed25519

@@ -70,12 +70,12 @@ check(
 const granted = validateImportSurface(['clock-monotonic', 'sha256-hex'], hostCaps({ grants: ['clock-monotonic', 'sha256-hex'] }));
 check(granted.ok === true, `clock-monotonic+sha256-hex granted and requested both pass validation (got ${JSON.stringify(granted.errors)})`);
 check(
-  IMPORT_SURFACE.length === 22 &&
+  IMPORT_SURFACE.length === 36 &&
     IMPORT_SURFACE.some(({ id }) => id === 'http-fetch') &&
     IMPORT_SURFACE.some(({ id }) => id === 'http-post-headers') &&
     IMPORT_SURFACE.some(({ id }) => id === 'transport-connect') &&
     IMPORT_SURFACE.some(({ id }) => id === 'transport-close'),
-  'browser authority table covers codec/network + transport surface (22 imports)'
+  'browser authority table covers codec/network/transport/pg surface (36 imports)'
 );
 
 // ── validateImportSurface: the remaining four denial branches, previously
@@ -541,6 +541,89 @@ for (const { id } of IMPORT_SURFACE) {
   );
   const b = browserImports.kotoba || browserImports;
   check(typeof b.transport_connect !== 'function', 'browser does not wire transport_connect');
+}
+
+
+// ── T8.4 Node pg-pool / wire / scram inject fail-closed ───────────────
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const grants = [
+    'pg-pool-open', 'pg-pool-acquire', 'pg-pool-query', 'pg-pool-release',
+    'pg-pool-stats', 'pg-pool-health', 'pg-pool-drain', 'pg-pool-close',
+    'pg-open', 'pg-query', 'pg-simple-query',
+    'pg-cancel-register', 'pg-cancel', 'scram-sha256',
+  ];
+  // write/secret required for query + scram surface admission
+  const deniedWrite = validateImportSurface(
+    ['pg-pool-query'],
+    hostCaps({ grants: ['pg-pool-query'] }),
+  );
+  check(
+    deniedWrite.ok === false &&
+      deniedWrite.errors.some((e) => e.error === 'limit/write-imports'),
+    'pg-pool-query denied without allowWriteImports',
+  );
+  const deniedSecret = validateImportSurface(
+    ['scram-sha256'],
+    hostCaps({ grants: ['scram-sha256'] }),
+  );
+  check(
+    deniedSecret.ok === false &&
+      deniedSecret.errors.some((e) => e.error === 'limit/secret-imports'),
+    'scram-sha256 denied without allowSecretImports',
+  );
+
+  const caps = hostCaps({
+    grants,
+    limits: { allowWriteImports: true, allowSecretImports: true },
+  });
+  const okSurf = validateImportSurface(grants, caps);
+  check(okSurf.ok === true, `pg surface validates (got ${JSON.stringify(okSurf.errors)})`);
+
+  const imports = actorHostImports(grants, caps, memoryBox, { runtime: 'node' });
+  check(typeof imports.pg_pool_open === 'function', 'Node wires pg_pool_open');
+  check(typeof imports.pg_open === 'function', 'Node wires pg_open');
+  check(typeof imports.scram_sha256 === 'function', 'Node wires scram_sha256');
+  // fail-closed defaults
+  check(imports.pg_pool_open(0, 1, 5432, 0, 1, 0, 1, 0, 1) === -1, 'pg_pool_open fail-closed -1');
+  check(imports.pg_pool_acquire(99) === -1, 'pg_pool_acquire fail-closed -1');
+  check(imports.pg_pool_health(99) === -1, 'pg_pool_health fail-closed -1');
+  check(imports.pg_pool_close(99) === -1, 'pg_pool_close fail-closed -1');
+  check(imports.pg_pool_query(99, 0, 0, 0, 0, 0, 0) === -1, 'pg_pool_query fail-closed -1');
+  check(imports.pg_pool_release(99) === -1, 'pg_pool_release fail-closed -1');
+  check(imports.pg_pool_stats(99, 0, 32) === -1, 'pg_pool_stats fail-closed -1');
+  check(imports.pg_pool_drain(99) === -1, 'pg_pool_drain fail-closed -1');
+  const openH = imports.pg_open(0, 1, 5432, 0, 1, 0, 1);
+  check(openH === 0n || openH === 0, `pg_open fail-closed 0 (got ${openH})`);
+  check(imports.pg_query(0n, 0, 0, 0, 0) === -1, 'pg_query fail-closed -1');
+  check(imports.pg_cancel_register(0n, 1, 2) === 0, 'pg_cancel_register fail-closed 0');
+  check(imports.pg_cancel(1) === -1, 'pg_cancel fail-closed -1');
+  // scram deny without allowlist/credentials
+  check(
+    imports.scram_sha256(0, 10, 32, 8, 4096, 64, 28, 128, 64) === -1,
+    'scram_sha256 deny without credentials',
+  );
+  // scram success with inject
+  const enc = new TextEncoder();
+  const ref = enc.encode('db/primary');
+  const salt = enc.encode('saltsalt');
+  const auth = enc.encode('n,,n=u,r=r1,r=r2,c=biws,p=x');
+  new Uint8Array(memoryBox.memory.buffer, 0, ref.length).set(ref);
+  new Uint8Array(memoryBox.memory.buffer, 32, salt.length).set(salt);
+  new Uint8Array(memoryBox.memory.buffer, 64, auth.length).set(auth);
+  const scramImports = actorHostImports(['scram-sha256'], caps, memoryBox, {
+    runtime: 'node',
+    scramCredentials: { 'db/primary': 's3cret' },
+    scramCredentialAllowlist: new Set(['db/primary']),
+  });
+  const n = scramImports.scram_sha256(0, 10, 32, 8, 4096, 64, 28, 128, 64);
+  check(n === 64, `scram_sha256 with credentials writes 64 (got ${n})`);
+
+  // browser does not wire pg
+  const b = actorHostImports(['pg-pool-open'], hostCaps({
+    grants: ['pg-pool-open'],
+  }), memoryBox, { runtime: 'browser' });
+  check(typeof b.pg_pool_open !== 'function', 'browser does not wire pg_pool_open');
 }
 
 if (failed) process.exit(1);
