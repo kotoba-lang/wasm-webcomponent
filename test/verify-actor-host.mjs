@@ -70,12 +70,12 @@ check(
 const granted = validateImportSurface(['clock-monotonic', 'sha256-hex'], hostCaps({ grants: ['clock-monotonic', 'sha256-hex'] }));
 check(granted.ok === true, `clock-monotonic+sha256-hex granted and requested both pass validation (got ${JSON.stringify(granted.errors)})`);
 check(
-  IMPORT_SURFACE.length === 36 &&
+  IMPORT_SURFACE.length === 54 &&
     IMPORT_SURFACE.some(({ id }) => id === 'http-fetch') &&
     IMPORT_SURFACE.some(({ id }) => id === 'http-post-headers') &&
     IMPORT_SURFACE.some(({ id }) => id === 'transport-connect') &&
     IMPORT_SURFACE.some(({ id }) => id === 'transport-close'),
-  'browser authority table covers codec/network/transport/pg surface (36 imports)'
+  'browser authority table covers codec/network/transport/pg+deep-wire surface (54 imports)'
 );
 
 // ── validateImportSurface: the remaining four denial branches, previously
@@ -624,6 +624,50 @@ for (const { id } of IMPORT_SURFACE) {
     grants: ['pg-pool-open'],
   }), memoryBox, { runtime: 'browser' });
   check(typeof b.pg_pool_open !== 'function', 'browser does not wire pg_pool_open');
+}
+
+
+// ── T8.4 Node deeper wire inject fail-closed ──────────────────────────
+{
+  const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
+  const deep = [
+    'pg-prepare', 'pg-session-reset', 'pg-close-statement', 'pg-query-state',
+    'pg-prepare-typed', 'pg-execute-params2', 'pg-execute-params',
+    'pg-bind-portal', 'pg-fetch-portal', 'pg-close-portal',
+    'pg-copy-out', 'pg-copy-in', 'pg-execute-batch',
+    'pg-open-scram', 'pg-open-scram-random', 'pg-open-scram-cancellable-random',
+    'pg-cancel-authority-use', 'pg-close-scram',
+  ];
+  const caps = hostCaps({
+    grants: deep,
+    limits: { allowWriteImports: true },
+  });
+  const ok = validateImportSurface(deep, caps);
+  check(ok.ok === true, `deep wire surface validates (got ${JSON.stringify(ok.errors)})`);
+  const imports = actorHostImports(deep, caps, memoryBox, { runtime: 'node' });
+  check(typeof imports.pg_prepare === 'function', 'Node wires pg_prepare');
+  check(typeof imports.pg_bind_portal === 'function', 'Node wires pg_bind_portal');
+  check(typeof imports.pg_open_scram === 'function', 'Node wires pg_open_scram');
+  check(imports.pg_prepare(0n, 0, 0, 0, 0, 0, 0, 0, 0) === -1, 'pg_prepare fail-closed -1');
+  check(imports.pg_session_reset(0n, 0, 0, 0, 0) === -1, 'pg_session_reset fail-closed -1');
+  check(imports.pg_close_statement(0n, 0, 0, 0, 0, 0, 0) === -1, 'pg_close_statement fail-closed -1');
+  check(imports.pg_query_state(0n, 0, 0, 0, 0, 0, 0) === -1, 'pg_query_state fail-closed -1');
+  check(imports.pg_bind_portal(0n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) === -1, 'pg_bind_portal fail-closed -1');
+  check(imports.pg_fetch_portal(0n, 0, 0, 0, 0, 0, 0, 0) === -1, 'pg_fetch_portal fail-closed -1');
+  check(imports.pg_close_portal(0n, 0, 0, 0, 0, 0, 0) === -1, 'pg_close_portal fail-closed -1');
+  check(imports.pg_copy_out(0n, 0, 0, 0, 0, 0, 0) === -1, 'pg_copy_out fail-closed -1');
+  check(imports.pg_copy_in(0n, 0, 0, 0, 0, 0, 0, 0, 0) === -1, 'pg_copy_in fail-closed -1');
+  check(imports.pg_execute_batch(0n, 0, 0, 0, 0, 0, 0, 0) === -1, 'pg_execute_batch fail-closed -1');
+  const h = imports.pg_open_scram(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  check(h === 0n || h === 0, `pg_open_scram fail-closed 0 (got ${h})`);
+  const hr = imports.pg_open_scram_random(0, 0, 0, 0, 0, 0, 0, 0, 0);
+  check(hr === 0n || hr === 0, `pg_open_scram_random fail-closed 0 (got ${hr})`);
+  check(imports.pg_cancel_authority_use(1) === -1, 'pg_cancel_authority_use fail-closed -1');
+  check(imports.pg_close_scram(0n) === -1, 'pg_close_scram fail-closed -1');
+  const b = actorHostImports(['pg-prepare'], hostCaps({
+    grants: ['pg-prepare'], limits: { allowWriteImports: true },
+  }), memoryBox, { runtime: 'browser' });
+  check(typeof b.pg_prepare !== 'function', 'browser does not wire pg_prepare');
 }
 
 if (failed) process.exit(1);

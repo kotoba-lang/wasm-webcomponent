@@ -146,6 +146,26 @@ export const IMPORT_SURFACE = [
   { id: 'pg-cancel-register', category: 'network', effects: new Set(['network']) },
   { id: 'pg-cancel', category: 'network', effects: new Set(['network']) },
   { id: 'scram-sha256', category: 'secret', effects: new Set(['secret']) },
+  // Deeper wire + SCRAM session open (T8.4 Node inject residual).
+  // Browser intentional absence; Node fail-closed (match JVM wire provider).
+  { id: 'pg-prepare', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-session-reset', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-close-statement', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-query-state', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-prepare-typed', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-execute-params2', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-execute-params', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-bind-portal', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-fetch-portal', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-close-portal', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-copy-out', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-copy-in', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-execute-batch', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-open-scram', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-open-scram-random', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-open-scram-cancellable-random', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-cancel-authority-use', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-close-scram', category: 'network', effects: new Set(['network']) },
 ];
 
 const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
@@ -1099,6 +1119,61 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       };
     }
   }
+
+  // ── Deeper wire + SCRAM session open (T8.4 residual) ────────────────
+  // Fail-closed i32→-1 / i64 open→0n. Optional opts.pgWireProvider overrides.
+  if (opts.runtime === 'node') {
+    const wireDeep = opts.pgWireProvider || {};
+    const denyI32 = () => -1;
+    const denyI64 = () => 0n;
+    const wireDeepI32 = (id, field, override) => {
+      if (!available.has(id)) return;
+      fns[field] = (...args) => {
+        ensureGranted(id);
+        if (overMemoryCap()) return -1;
+        if (typeof wireDeep[override] === 'function') {
+          try { return wireDeep[override](...args) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    };
+    const wireDeepI64 = (id, field, override) => {
+      if (!available.has(id)) return;
+      fns[field] = (...args) => {
+        ensureGranted(id);
+        if (overMemoryCap()) return 0n;
+        if (typeof wireDeep[override] === 'function') {
+          try {
+            const h = wireDeep[override](...args);
+            return typeof h === 'bigint' ? h : BigInt(h || 0);
+          } catch (_) { return 0n; }
+        }
+        return 0n;
+      };
+    };
+    // prepare / execute / portal / copy / batch (i32 fail-closed)
+    wireDeepI32('pg-prepare', 'pg_prepare', 'prepare');
+    wireDeepI32('pg-session-reset', 'pg_session_reset', 'sessionReset');
+    wireDeepI32('pg-close-statement', 'pg_close_statement', 'closeStatement');
+    wireDeepI32('pg-query-state', 'pg_query_state', 'queryState');
+    wireDeepI32('pg-prepare-typed', 'pg_prepare_typed', 'prepareTyped');
+    wireDeepI32('pg-execute-params2', 'pg_execute_params2', 'executeParams2');
+    wireDeepI32('pg-execute-params', 'pg_execute_params', 'executeParams');
+    wireDeepI32('pg-bind-portal', 'pg_bind_portal', 'bindPortal');
+    wireDeepI32('pg-fetch-portal', 'pg_fetch_portal', 'fetchPortal');
+    wireDeepI32('pg-close-portal', 'pg_close_portal', 'closePortal');
+    wireDeepI32('pg-copy-out', 'pg_copy_out', 'copyOut');
+    wireDeepI32('pg-copy-in', 'pg_copy_in', 'copyIn');
+    wireDeepI32('pg-execute-batch', 'pg_execute_batch', 'executeBatch');
+    wireDeepI32('pg-cancel-authority-use', 'pg_cancel_authority_use', 'cancelAuthorityUse');
+    wireDeepI32('pg-close-scram', 'pg_close_scram', 'closeScram');
+    // SCRAM session open → handle 0
+    wireDeepI64('pg-open-scram', 'pg_open_scram', 'openScram');
+    wireDeepI64('pg-open-scram-random', 'pg_open_scram_random', 'openScramRandom');
+    wireDeepI64('pg-open-scram-cancellable-random', 'pg_open_scram_cancellable_random', 'openScramCancellableRandom');
+  }
+
+
 
 
 
