@@ -1,17 +1,17 @@
 # kotoba-lang/wasm-webcomponent
 
-A small, dependency-free library for hosting a `kotoba wasm emit` binary
-([kotoba-lang/kotoba](https://github.com/kotoba-lang/kotoba)) as a browser
-WebComponent, running it via the browser's own native `WebAssembly` engine
-— already-AOT-compiled machine code, no interpreter, no JVM, no
-`com.dylibso.chicory`, no wasmtime.
+Kototama's **browser host** — a small, dependency-free library for hosting a
+`kotoba wasm emit` binary as a browser WebComponent, running it via the
+browser's own native `WebAssembly` engine. Already-AOT-compiled machine code,
+no interpreter, no JVM, no `com.dylibso.chicory`, no wasmtime.
 
-Extracted from [kotoba-lang/kototama](https://github.com/kotoba-lang/kototama)'s
-original `web/` PoC (see
-[ADR-2607061630](https://github.com/com-junkawasaki/root/blob/main/90-docs/adr/2607061630-kototama-browser-wasm-aot-webcomponent.md)
-and its follow-up) so any repo can adopt the same pattern instead of
-hand-rolling it. kototama's own `web/` now imports from here rather than
-duplicating the code.
+The product is [`kototama`](https://github.com/kotoba-lang/kototama) (言霊).
+This library stays extracted so any repo can adopt the same pattern instead
+of depending on kototama core (ADR-2607061630 / ADR-2608139980).
+kototama's own `web/` imports from here rather than duplicating the code.
+
+Guest binaries are produced by [`amu`](https://github.com/kotoba-lang/amu)
+(編む), not by this host.
 
 ## Usage
 
