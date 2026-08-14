@@ -9,10 +9,10 @@
 // CDN-servable as raw ES modules (see README).
 //
 // Amu wasm32-kotoba-v1 guests import `kotoba:cap`/`call` (i64,i64)->i64,
-// not `actor:host`. `kotobaCapImports` always links that module (same as
-// kototama.tender always appending cap-call-host-fn). Capability 7 is
-// clock/now → Date.now() under the `:clock-monotonic` grant. Any other
-// id fail-closes at the call; missing grant fail-closes the same way.
+// not `actor:host`. That host lives in ClojureScript
+// (`src-cljs/kotoba/kotoba_cap.cljs` → `src/kotoba-cap.js`), not here —
+// new host surface is cljs; this file stays the legacy hand-JS actor:host
+// plane. Importing this module must not pull the cljs runtime.
 //
 // ---------------------------------------------------------------------------
 // Scope (honest R2): 7 of the 9 `actor:host` imports are unconditionally
@@ -1440,48 +1440,6 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   }
 
   return fns;
-}
-
-export const KOTOBA_CAP_MODULE = 'kotoba:cap';
-export const CLOCK_NOW_CAPABILITY_ID = 7n;
-
-function deniedCapCall(reason, info) {
-  const err = new Error('kototama.tender: host import denied');
-  err.kototamaDenied = { import: 'cap-call', reason, ...info };
-  throw err;
-}
-
-/**
- * Host import object for amu wasm32-kotoba-v1 `kotoba:cap`/`call`.
- * Always provided; linking does not require the guest to request
- * actor:host ids. Grant re-check is per-call, same as JVM tender.
- */
-export function kotobaCapImports(caps) {
-  const c = hostCaps(caps);
-  return {
-    call(id, _seed) {
-      const capId = typeof id === 'bigint' ? id : BigInt(id);
-      if (capId === CLOCK_NOW_CAPABILITY_ID) {
-        if (!c.grants.has('clock-monotonic')) {
-          deniedCapCall('grant/missing', { grant: 'clock-monotonic', 'capability-id': Number(capId) });
-        }
-        return BigInt(Date.now());
-      }
-      deniedCapCall('grant/unknown-capability', { 'capability-id': Number(capId) });
-    },
-  };
-}
-
-/**
- * Import object for an amu-compiled wasm32 guest: actor:host (legacy /
- * kgraph) plus kotoba:cap (typed-cap-call i64). Extra unused modules are
- * ignored by WebAssembly.instantiate.
- */
-export function amuCompileImports(requestedIds, caps, memoryBox, opts = {}) {
-  return {
-    kotoba: actorHostImports(requestedIds, caps, memoryBox, opts),
-    [KOTOBA_CAP_MODULE]: kotobaCapImports(caps),
-  };
 }
 
 /**

@@ -84,16 +84,22 @@ KotobaWasmElement.define('my-actor-host-demo', {
 ```
 
 Amu `compile --target wasm` guests import `kotoba:cap`/`call`, not
-`actor:host`. Always link that module (JVM tender does the same):
+`actor:host`. That host is ClojureScript (`src-cljs/kotoba/kotoba_cap.cljs`
+→ `src/kotoba-cap.js`), not more hand-written JS. Always link that module
+(JVM tender does the same):
 
 ```js
 import { KotobaWasmElement } from './src/kotoba-wasm-element.js';
-import { amuCompileImports, hostCaps } from './src/actor-host.js';
+import { actorHostImports, hostCaps } from './src/actor-host.js';
+import { kotobaCapImports } from './src/kotoba-cap.js';
 
 KotobaWasmElement.define('my-amu-clock', {
   createImports(memoryBox) {
     const caps = hostCaps({ grants: ['clock-monotonic'] });
-    return amuCompileImports(['clock-monotonic'], caps, memoryBox);
+    return {
+      kotoba: actorHostImports(['clock-monotonic'], caps, memoryBox),
+      'kotoba:cap': kotobaCapImports(caps),
+    };
   },
 });
 ```
@@ -164,6 +170,18 @@ KotobaWasmElement.define('my-amu-clock', {
   parity proof: the same 300-tick run asserts the exact entity counts
   (`12` at tick 240, `8` after the tick-270 nova burst, `10` at 300,
   seed 7) kotoba's own JVM/Chicory test pins.
+- `src-cljs/kotoba/kotoba_cap.cljs` / `src/kotoba-cap.js` — the browser/Node
+  host for amu wasm32-kotoba-v1 `kotoba:cap`/`call` (typed-cap-call i64).
+  **Authored in ClojureScript** and compiled once via `shadow-cljs.edn`'s
+  `:kotoba-cap` build (`:target :esm`) to `src/kotoba-cap.js` — same
+  pattern as `kami-engine-host` / `gpu-clear-host`. This is the host, not
+  a `.kotoba` guest; new Node proof is nbb (`npm run test:kotoba-cap`),
+  not `.mjs`. Capability 7 is clock/now under the `:clock-monotonic`
+  grant; any other id fail-closes with the same
+  `kototama.tender: host import denied` message as the JVM tender.
+  `actor-host.js` does not re-export this module, so the cljs runtime is
+  not on the actor:host path. Regenerate with `npm run release:kotoba-cap`
+  (the compiled output is checked in).
 - `src/actor-host.js` — a peer, browser/Node-native implementation of the
   `tender` role `kototama.contract` defines (the same role
   `kotoba-lang/kototama`'s JVM/Chicory `kototama.tender` implements —
