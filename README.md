@@ -181,7 +181,12 @@ KotobaWasmElement.define('my-amu-clock', {
   `kototama.tender: host import denied` message as the JVM tender.
   `actor-host.js` does not re-export this module, so the cljs runtime is
   not on the actor:host path. Regenerate with `npm run release:kotoba-cap`
-  (the compiled output is checked in).
+  (the compiled output is checked in). Proof against **amu-woven** bytes
+  (not only hand-written WAT) is `examples/kotoba-cap/amu-compiled-clock-now.wasm`
+  + `npm run test:kotoba-cap`.
+- `examples/kotoba-cap/` — amu `compile-source :wasm32-kotoba-v1` guest
+  (`clock/now` → `kotoba:cap`/`call` id 7) hosted by `kotoba-cap.js`.
+  Same fixture kototama binds on the JVM (`amu-compiled-clock-now.wasm`).
 - `src/actor-host.js` — a peer, browser/Node-native implementation of the
   `tender` role `kototama.contract` defines (the same role
   `kotoba-lang/kototama`'s JVM/Chicory `kototama.tender` implements —

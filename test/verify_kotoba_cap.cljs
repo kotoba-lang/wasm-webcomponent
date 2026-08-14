@@ -113,6 +113,67 @@
                      (check (and (>= millis before) (<= millis after))
                             (str "compiled kotobaCapImports clock/now (got " millis ")")))))))))
 
+(defn- amu-clock-path []
+  (.join path (.cwd js/process) "examples/kotoba-cap/amu-compiled-clock-now.wasm"))
+
+(defn- millis-from-main [instance]
+  (let [before (js/Date.now)
+        n ((.-main (.-exports instance)))
+        after (js/Date.now)
+        millis (if (= (js-typeof n) "bigint") (js/Number n) n)]
+    {:before before :after after :millis millis}))
+
+(defn- in-window? [{:keys [before after millis]}]
+  (and (>= millis before) (<= millis after)))
+
+(defn- check-amu-bytes [bytes]
+  (let [text (.toString bytes "latin1")]
+    (check (boolean (re-find #"kotoba:cap" text))
+           "amu-compiled clock fixture imports kotoba:cap")
+    (check (not (boolean (re-find #"kotoba:typed" text)))
+           "amu-compiled clock fixture is not kotoba:typed/cap-call")
+    bytes))
+
+(defn- assert-cljs-host [bytes]
+  (let [caps (hostCaps #js {:grants #js ["clock-monotonic"]})]
+    (-> (cap-imports bytes caps)
+        (.then (fn [result]
+                 (let [got (millis-from-main (.-instance result))]
+                   (check (in-window? got)
+                          (str "cljs host runs amu-woven clock/now (got " (:millis got) ")")))
+                 bytes)))))
+
+(defn- instantiate-with-compiled-js [bytes]
+  (let [url (str "file://" (.join path (.cwd js/process) "src/kotoba-cap.js"))]
+    (-> (js/import url)
+        (.then (fn [mod]
+                 (let [caps (hostCaps #js {:grants #js ["clock-monotonic"]})
+                       imports #js {}]
+                   (aset imports (.-KOTOBA_CAP_MODULE mod)
+                         ((.-kotobaCapImports mod) caps))
+                   (js/WebAssembly.instantiate bytes imports)))))))
+
+(defn- assert-compiled-host [bytes]
+  (if-not (.existsSync fs "src/kotoba-cap.js")
+    (js/Promise.resolve nil)
+    (-> (instantiate-with-compiled-js bytes)
+        (.then (fn [result]
+                 (let [got (millis-from-main (.-instance result))]
+                   (check (in-window? got)
+                          (str "compiled kotoba-cap.js runs amu-woven clock/now (got "
+                               (:millis got) ")"))))))))
+
+(defn- run-amu-compiled-clock []
+  (let [p (amu-clock-path)]
+    (when-not (.existsSync fs p)
+      (throw (js/Error. (str "missing amu-compiled fixture: " p))))
+    (-> (fsp/readFile p)
+        (.then (fn [bytes]
+                 (check-amu-bytes bytes)
+                 (assert-cljs-host bytes)))
+        (.then (fn [bytes]
+                 (assert-compiled-host bytes))))))
+
 (defn -main []
   (-> (fsp/mkdtemp (.join path (os/tmpdir) "kotoba-cap-"))
       (.then (fn [dir]
@@ -122,6 +183,7 @@
                                 (.then (fn [unknown-bytes]
                                          (run-source-checks clock-bytes unknown-bytes)))))))))
       (.then (fn [_] (maybe-compiled-exports)))
+      (.then (fn [_] (run-amu-compiled-clock)))
       (.then (fn []
                (when @failed?
                  (js/process.exit 1))
