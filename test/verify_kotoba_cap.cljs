@@ -1,0 +1,134 @@
+(ns verify-kotoba-cap
+  "nbb proof that cljs `kotoba.kotoba-cap` hosts amu `kotoba:cap`/`call`.
+  Run from repo root:
+    npx nbb -cp src-cljs:test test/verify_kotoba_cap.cljs
+  New Node harnesses in this repo are nbb, not .mjs (CLAUDE.md)."
+  (:require ["node:child_process" :refer [spawnSync]]
+            ["node:fs" :as fs]
+            ["node:fs/promises" :as fsp]
+            ["node:os" :as os]
+            ["node:path" :as path]
+            ["../src/actor-host.js" :refer [hostCaps actorHostImports]]
+            [kotoba.kotoba-cap :as cap]))
+
+(def js-typeof (js/Function. "x" "return typeof x"))
+
+(def failed? (atom false))
+
+(defn- check [cond message]
+  (if cond
+    (println (str "OK: " message))
+    (do (reset! failed? true)
+        (js/console.error (str "FAIL: " message)))))
+
+(def clock-wat
+  "(module
+  (import \"kotoba:cap\" \"call\" (func $cap (param i64 i64) (result i64)))
+  (func (export \"main\") (result i64)
+    (call $cap (i64.const 7) (i64.const 0))))
+")
+
+(def unknown-wat
+  "(module
+  (import \"kotoba:cap\" \"call\" (func $cap (param i64 i64) (result i64)))
+  (func (export \"main\") (result i64)
+    (call $cap (i64.const 4) (i64.const 0))))
+")
+
+(defn- cap-imports [bytes caps]
+  (let [imports #js {}]
+    (aset imports cap/kotoba-cap-module (cap/kotoba-cap-imports caps))
+    (js/WebAssembly.instantiate bytes imports)))
+
+(defn- parse-wat [dir name wat]
+  (let [wat-path (.join path dir (str name ".wat"))
+        wasm-path (.join path dir (str name ".wasm"))]
+    (-> (fsp/writeFile wat-path wat)
+        (.then (fn []
+                 (let [parsed (spawnSync "wasm-tools" #js ["parse" wat-path "-o" wasm-path]
+                                         #js {:encoding "utf8"})]
+                   (when-not (zero? (.-status parsed))
+                     (throw (js/Error. (str "wasm-tools parse failed: "
+                                            (or (.-stderr parsed) (.-error parsed))))))
+                   (fsp/readFile wasm-path)))))))
+
+(defn- denied-call? [thunk]
+  (try
+    (thunk)
+    false
+    (catch :default e
+      (boolean (re-find #"host import denied" (or (.-message e) ""))))))
+
+(defn- run-source-checks [clock-bytes unknown-bytes]
+  (let [caps-clock (hostCaps #js {:grants #js ["clock-monotonic"]})
+        caps-none (hostCaps #js {:grants #js []})]
+    (-> (cap-imports clock-bytes caps-clock)
+        (.then (fn [result]
+                 (let [before (js/Date.now)
+                       n ((.-main (.-exports (.-instance result))))
+                       after (js/Date.now)
+                       millis (if (= (js-typeof n) "bigint") (js/Number n) n)]
+                   (check (and (>= millis before) (<= millis after))
+                          (str "granted clock/now returns host millis (got " millis ")")))
+                 (cap-imports clock-bytes caps-none)))
+        (.then (fn [result]
+                 (check (denied-call? #((.-main (.-exports (.-instance result)))))
+                        "missing :clock-monotonic grant is fail-closed at the call")
+                 (cap-imports unknown-bytes caps-clock)))
+        (.then (fn [result]
+                 (check (denied-call? #((.-main (.-exports (.-instance result)))))
+                        "unknown cap id 4 is fail-closed even when clock is granted")
+                 (let [imports (cap/amu-compile-imports #js ["clock-monotonic"]
+                                                        caps-clock
+                                                        #js {}
+                                                        #js {}
+                                                        actorHostImports)
+                       cap-mod (unchecked-get imports cap/kotoba-cap-module)]
+                   (check (= (js-typeof (.-clock_monotonic (.-kotoba imports))) "function")
+                          "amu-compile-imports still links actor:host clock")
+                   (check (= (js-typeof (.-call cap-mod)) "function")
+                          "amu-compile-imports always links kotoba:cap/call")
+                   (check (= (str cap/clock-now-capability-id) "7")
+                          "clock/now wire id is 7")))))))
+
+(defn- maybe-compiled-exports []
+  (if-not (.existsSync fs "src/kotoba-cap.js")
+    (do (println "SKIP: src/kotoba-cap.js not compiled yet")
+        (js/Promise.resolve nil))
+    (let [url (str "file://" (.join path (.cwd js/process) "src/kotoba-cap.js"))]
+      (-> (js/import url)
+          (.then (fn [mod]
+                   (check (= (js-typeof (.-kotobaCapImports mod)) "function")
+                          "checked-in src/kotoba-cap.js exports kotobaCapImports")
+                   (check (= (.-KOTOBA_CAP_MODULE mod) "kotoba:cap")
+                          "checked-in src/kotoba-cap.js exports KOTOBA_CAP_MODULE")
+                   (check (= (str (.-CLOCK_NOW_CAPABILITY_ID mod)) "7")
+                          "checked-in src/kotoba-cap.js clock id is 7")
+                   (let [caps (hostCaps #js {:grants #js ["clock-monotonic"]})
+                         call (.-call ((.-kotobaCapImports mod) caps))
+                         before (js/Date.now)
+                         n (call (.-CLOCK_NOW_CAPABILITY_ID mod) (js/BigInt 0))
+                         after (js/Date.now)
+                         millis (js/Number n)]
+                     (check (and (>= millis before) (<= millis after))
+                            (str "compiled kotobaCapImports clock/now (got " millis ")")))))))))
+
+(defn -main []
+  (-> (fsp/mkdtemp (.join path (os/tmpdir) "kotoba-cap-"))
+      (.then (fn [dir]
+               (-> (parse-wat dir "clock-now" clock-wat)
+                   (.then (fn [clock-bytes]
+                            (-> (parse-wat dir "unknown" unknown-wat)
+                                (.then (fn [unknown-bytes]
+                                         (run-source-checks clock-bytes unknown-bytes)))))))))
+      (.then (fn [_] (maybe-compiled-exports)))
+      (.then (fn []
+               (when @failed?
+                 (js/process.exit 1))
+               (println "OK: kotoba:cap/call hosts clock/now and fail-closes everything else")
+               (js/process.exit 0)))
+      (.catch (fn [e]
+                (js/console.error e)
+                (js/process.exit 1)))))
+
+(-main)

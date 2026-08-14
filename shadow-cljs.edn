@@ -30,6 +30,16 @@
                         unpackRgba8 kotoba.gpu-clear-host/unpack-rgba8}}}
    :release {:compiler-options {:optimizations :advanced}}}
 
+  :kotoba-cap
+  {:target :esm
+   :output-dir "src"
+   :modules {:kotoba-cap
+             {:exports {kotobaCapImports kotoba.kotoba-cap/kotoba-cap-imports
+                        amuCompileImports kotoba.kotoba-cap/amu-compile-imports
+                        KOTOBA_CAP_MODULE kotoba.kotoba-cap/kotoba-cap-module
+                        CLOCK_NOW_CAPABILITY_ID kotoba.kotoba-cap/clock-now-capability-id}}}
+   :release {:compiler-options {:optimizations :advanced}}}
+
   :solar-render-host
   {:target :esm
    :output-dir "src"
