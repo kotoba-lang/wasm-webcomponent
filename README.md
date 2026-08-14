@@ -83,6 +83,21 @@ KotobaWasmElement.define('my-actor-host-demo', {
 });
 ```
 
+Amu `compile --target wasm` guests import `kotoba:cap`/`call`, not
+`actor:host`. Always link that module (JVM tender does the same):
+
+```js
+import { KotobaWasmElement } from './src/kotoba-wasm-element.js';
+import { amuCompileImports, hostCaps } from './src/actor-host.js';
+
+KotobaWasmElement.define('my-amu-clock', {
+  createImports(memoryBox) {
+    const caps = hostCaps({ grants: ['clock-monotonic'] });
+    return amuCompileImports(['clock-monotonic'], caps, memoryBox);
+  },
+});
+```
+
 ## Files
 
 - `src/kotoba-wasm-element.js` — `KotobaWasmElement`, the reusable custom
