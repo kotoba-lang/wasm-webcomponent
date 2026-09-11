@@ -16,7 +16,7 @@
   (never a real LLM provider called directly from the browser with an
   embedded API key -- see kotoba-wasm-worker-host.js's namespace comment).
 
-  Run from this repo's root: `npx nbb -cp test/browser
+  Run from this repo's root: `kbb --backend sci -cp test/browser
   test/browser/verify_llm_infer_browser.cljk`
 
   The guest fixture bakes the prompt string in at build time (unlike

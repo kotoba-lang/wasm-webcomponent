@@ -523,7 +523,7 @@ now encodes:
 
 **Proof these actually discriminate pass/fail** (not just theoretically):
 both of Addendum 6's real historical bugs were deliberately reintroduced
-against a local worktree, rebuilt via `shadow-cljs release`, and confirmed to
+against a local worktree, rebuilt via `amu compile --target wasm32-browser`, and confirmed to
 fail the corresponding test before being reverted:
 - Swapping the R/B channels in `gpu_clear_host.cljs`'s `clearValue` made
   `verify-render-gpu-clear.mjs` fail with every sampled pixel reading
