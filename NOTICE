@@ -37,7 +37,7 @@ See `src/vendor/README.md` for the full rationale.
 Not third party
 --------------------------------------------------------------------------------
 
-`src-cljs/vendor/kotoba/kami_host.cljc` is also under a directory named
+`src-cljs/vendor/kotoba/kami_host.cljk` is also under a directory named
 `vendor/`, but it is kotoba-lang's own code copied from a sibling repository,
 not a third-party dependency. It is covered by this repository's Apache-2.0
 licence like the rest of the first-party source.

@@ -84,7 +84,7 @@ KotobaWasmElement.define('my-actor-host-demo', {
 ```
 
 Amu `compile --target wasm` guests import `kotoba:cap`/`call`, not
-`actor:host`. That host is ClojureScript (`src-cljs/kotoba/kotoba_cap.cljs`
+`actor:host`. That host is ClojureScript (`src-cljs/kotoba/kotoba_cap.cljk`
 → `src/kotoba-cap.js`), not more hand-written JS. Always link that module
 (JVM tender does the same):
 
@@ -144,14 +144,14 @@ KotobaWasmElement.define('my-amu-clock', {
   (`main()` → 7) and once denying everything (`main()` → 0) — proves the
   check is real per-instantiation policy, not a stub that always answers
   one way.
-- `src-cljs/kotoba/kami_ecs.cljs` / `src/kami-ecs.js` — the browser/Node
+- `src-cljs/kotoba/kami_ecs.cljk` / `src/kami-ecs.js` — the browser/Node
   host for `kotoba-lang/kotoba`'s `kotoba.kami-host` (the deterministic
   game-engine ECS behind the `kami-*` host imports, kotoba-core-contracts
   `"kami/engine"` id 233, single `(module "kotoba")` ABI — NOT
   `kami-engine-host.js`'s 4-namespace `kami:engine/*` shape). **Authored
   in ClojureScript** (like `kami-engine-host.js`, unlike this repo's
   hand-JS modules — it replaced an earlier hand-JS port): the portable
-  `.cljc` ECS itself is `src-cljs/vendor/kotoba/kami_host.cljc`, VENDORED
+  `.cljc` ECS itself is `src-cljs/vendor/kotoba/kami_host.cljk`, VENDORED
   file-for-file from `kotoba-lang/kotoba` (the `src/vendor` ed25519
   convention; provenance sha in its header) so ONE source serves kotoba's
   JVM compat suite, its nbb parity script, and this ESM — no drift.
@@ -170,7 +170,7 @@ KotobaWasmElement.define('my-amu-clock', {
   parity proof: the same 300-tick run asserts the exact entity counts
   (`12` at tick 240, `8` after the tick-270 nova burst, `10` at 300,
   seed 7) kotoba's own JVM/Chicory test pins.
-- `src-cljs/kotoba/kotoba_cap.cljs` / `src/kotoba-cap.js` — the browser/Node
+- `src-cljs/kotoba/kotoba_cap.cljk` / `src/kotoba-cap.js` — the browser/Node
   host for amu wasm32-kotoba-v1 `kotoba:cap`/`call` (typed-cap-call i64).
   **Authored in ClojureScript** and compiled once via `shadow-cljs.edn`'s
   `:kotoba-cap` build (`:target :esm`) to `src/kotoba-cap.js` — same
@@ -213,7 +213,7 @@ KotobaWasmElement.define('my-amu-clock', {
   and `crypto-demo.wasm` (`gen_keypair`/`sign`/`verify` — same fixture
   shape `kototama.tender`'s (JVM) `tender_test.clj` compiles via
   `wasm-tools`).
-- `src-cljs/kotoba/kami_engine_host.cljs` / `src/kami-engine-host.js` — a
+- `src-cljs/kotoba/kami_engine_host.cljk` / `src/kami-engine-host.js` — a
   port of `kotoba-lang/kami-script-runtime-rs` (the Rust/wasmtime WASM host
   for `kotoba-lang/engine`-compiled `.clj` game scripts), **authored in
   ClojureScript and compiled once via `shadow-cljs.edn`'s `:kami-engine-host`
@@ -244,7 +244,7 @@ KotobaWasmElement.define('my-amu-clock', {
   (the same fixture `kami-script-runtime-rs/tests/fixtures/` ships) driven
   for 300 ticks via `requestAnimationFrame` (real-browser confirmation
   outstanding — see ADR-2607078000's Consequences).
-- `src-cljs/kotoba/gpu_clear_host.cljs` / `src/gpu-clear-host.js` — ADR-
+- `src-cljs/kotoba/gpu_clear_host.cljk` / `src/gpu-clear-host.js` — ADR-
   2607078000 Track B **Phase 0**: the browser host for the `gpu-clear`
   capability, the first proof that a compiled `.kotoba` guest can drive a
   real WebGPU canvas clear through a genuinely synchronous Wasm
@@ -260,7 +260,7 @@ KotobaWasmElement.define('my-amu-clock', {
 - `examples/gpu-clear/` — `demo_gpu_clear.kotoba`/`.wasm` (a `.kotoba`
   guest that calls `gpu_clear` with a packed color) + `index.html`,
   browser-verified against `setupGpuClearHost` end to end.
-- `src-cljs/kotoba/solar_render_host.cljs` / `src/solar-render-host.js` —
+- `src-cljs/kotoba/solar_render_host.cljk` / `src/solar-render-host.js` —
   ADR-2607078000 Track B **Phase 1**: the browser host for
   `gpu-set-position`/`gpu-draw-frame`, rendering `kami-solar-helix-scene`'s
   9 bodies (Sun + 8 planets) as spheres. The guest (compiled from

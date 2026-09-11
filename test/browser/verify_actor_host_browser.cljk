@@ -1,7 +1,7 @@
 (ns verify-actor-host-browser
   "Real-browser (headless Chromium via Playwright) E2E for actor-host.js +
   KotobaWasmElement, run via nbb FROM THIS REPO'S ROOT:
-    npx nbb -cp test/browser test/browser/verify_actor_host_browser.cljs
+    npx nbb -cp test/browser test/browser/verify_actor_host_browser.cljk
   Loads examples/actor-host/index.html UNMODIFIED in a full headless
   Chromium and asserts both demo custom elements actually run to
   completion through native WebAssembly.instantiateStreaming + a real DOM

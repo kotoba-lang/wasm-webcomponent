@@ -18,10 +18,10 @@
     "compile:kotoba-cap": "shadow-cljs compile kotoba-cap",
     "release:kotoba-cap": "shadow-cljs release kotoba-cap",
     "test": "for f in test/verify-*.mjs; do node \"$f\" || exit 1; done",
-    "test:kotoba-cap": "npx nbb -cp src-cljs:test test/verify_kotoba_cap.cljs",
+    "test:kotoba-cap": "npx nbb -cp src-cljs:test test/verify_kotoba_cap.cljk",
     "test:render": "for f in test/render/verify-*.mjs; do node \"$f\" || exit 1; done",
-    "test:browser": "npx nbb -cp test/browser test/browser/verify_actor_host_browser.cljs",
-    "test:http-post-browser": "npx nbb -cp test/browser test/browser/verify_http_post_browser.cljs",
-    "test:llm-infer-browser": "npx nbb -cp test/browser test/browser/verify_llm_infer_browser.cljs"
+    "test:browser": "npx nbb -cp test/browser test/browser/verify_actor_host_browser.cljk",
+    "test:http-post-browser": "npx nbb -cp test/browser test/browser/verify_http_post_browser.cljk",
+    "test:llm-infer-browser": "npx nbb -cp test/browser test/browser/verify_llm_infer_browser.cljk"
   }
 }

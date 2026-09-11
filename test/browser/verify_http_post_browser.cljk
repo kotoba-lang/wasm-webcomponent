@@ -15,7 +15,7 @@
   with real COOP/COEP headers.
 
   Run from this repo's root: `npx nbb -cp test/browser
-  test/browser/verify_http_post_browser.cljs`
+  test/browser/verify_http_post_browser.cljk`
 
   The guest fixture is generated fresh each run (a small WAT template with
   the local echo server's OS-assigned port baked in, compiled via the

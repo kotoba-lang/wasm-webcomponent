@@ -3,7 +3,7 @@
   that `llm-infer` works in an ACTUAL browser tab -- not just Node inject
   (`test/verify-http-post.mjs`'s inject-path coverage never exercised
   llm-infer at all) -- via the SAME SharedArrayBuffer+Atomics.wait bridge
-  `http-post` already proved out (`test/browser/verify_http_post_browser.cljs`).
+  `http-post` already proved out (`test/browser/verify_http_post_browser.cljk`).
 
   `src/actor-host.js`'s `llm_infer` reuses the identical bridge shape as
   `http_post` (`opts.llmInferBridge` + `opts.llmInferUrl`, POSTing the raw
@@ -17,7 +17,7 @@
   embedded API key -- see kotoba-wasm-worker-host.js's namespace comment).
 
   Run from this repo's root: `npx nbb -cp test/browser
-  test/browser/verify_llm_infer_browser.cljs`
+  test/browser/verify_llm_infer_browser.cljk`
 
   The guest fixture bakes the prompt string in at build time (unlike
   http-post's fixture, llm-infer's target URL is never guest-controlled --
