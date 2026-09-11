@@ -13,7 +13,7 @@
   orbital angle) and calls <code>gpu-set-position</code> once per body,
   then <code>gpu-draw-frame</code> once. All matrix/camera/pipeline/mesh
   work stays host-side
-  (<code>src-cljs/kotoba/solar_render_host.cljs</code>); the guest only
+  (<code>src-cljs/kotoba/solar_render_host.cljk</code>); the guest only
   decides where each sphere goes. <code>main</code> is a 0-arity,
   single-frame function — this page drives the animation itself, calling
   <code>instance.exports.main()</code> again every

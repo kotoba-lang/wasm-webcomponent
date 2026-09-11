@@ -10,7 +10,7 @@
 //
 // Amu wasm32-kotoba-v1 guests import `kotoba:cap`/`call` (i64,i64)->i64,
 // not `actor:host`. That host lives in ClojureScript
-// (`src-cljs/kotoba/kotoba_cap.cljs` → `src/kotoba-cap.js`), not here —
+// (`src-cljs/kotoba/kotoba_cap.cljk` → `src/kotoba-cap.js`), not here —
 // new host surface is cljs; this file stays the legacy hand-JS actor:host
 // plane. Importing this module must not pull the cljs runtime.
 //

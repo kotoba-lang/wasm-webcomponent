@@ -330,7 +330,7 @@ for (const { id } of IMPORT_SURFACE) {
 // the SAME bridge shape http_post uses (a mock postSync here stands in for
 // the real createSabHttpPostBridge instance kotoba-wasm-worker-host.js
 // passes for BOTH capabilities; the real browser round-trip is covered by
-// test/browser/verify_llm_infer_browser.cljs) ──────────────────────────────
+// test/browser/verify_llm_infer_browser.cljk) ──────────────────────────────
 {
   const memoryBox = { memory: new WebAssembly.Memory({ initial: 1 }) };
   const calls = [];
