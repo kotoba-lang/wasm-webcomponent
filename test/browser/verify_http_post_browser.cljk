@@ -14,7 +14,7 @@
   real HTTP POST round-trip against a real local server, on a page served
   with real COOP/COEP headers.
 
-  Run from this repo's root: `npx nbb -cp test/browser
+  Run from this repo's root: `kbb --backend sci -cp test/browser
   test/browser/verify_http_post_browser.cljk`
 
   The guest fixture is generated fresh each run (a small WAT template with
