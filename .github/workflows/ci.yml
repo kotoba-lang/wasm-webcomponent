@@ -24,7 +24,7 @@ jobs:
   actor-host-browser-verify:
     # Real-browser (headless Chromium) DOM/custom-element E2E for
     # actor-host.js + KotobaWasmElement (test/browser/verify_actor_host_browser.cljk,
-    # run via nbb per CLAUDE.md's "new Node-side test harnesses are nbb, not
+    # run via nbb per AGENTS.md's "new Node-side test harnesses are nbb, not
     # .mjs/.cjs" rule). test/verify-actor-host.mjs already covers the same
     # host-fn logic via Node's own WebAssembly.instantiate directly; this is
     # the customElements/shadow-DOM/`<script type="module">` layer that

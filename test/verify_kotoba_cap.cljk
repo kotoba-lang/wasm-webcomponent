@@ -2,7 +2,7 @@
   "nbb proof that cljs `kotoba.kotoba-cap` hosts amu `kotoba:cap`/`call`.
   Run from repo root:
     kbb --backend sci -cp src-cljs:test test/verify_kotoba_cap.cljk
-  New Node harnesses in this repo are nbb, not .mjs (CLAUDE.md)."
+  New Node harnesses in this repo are nbb, not .mjs (AGENTS.md)."
   (:require ["node:child_process" :refer [spawnSync]]
             ["node:fs" :as fs]
             ["node:fs/promises" :as fsp]
