@@ -1,6 +1,6 @@
 (ns lib.browser-harness
   "General-purpose (non-WebGPU) real-Chromium test harness for this repo's
-  zero-build-step ES modules, run via nbb -- CLAUDE.md: new Node-side
+  zero-build-step ES modules, run via nbb -- AGENTS.md: new Node-side
   test/verification harnesses are written in nbb, not .mjs/.cjs. Ports the
   static-server + full-Chromium-launch technique
   test/render/lib/webgpu-harness.mjs established (ADR-2607078000 Addendum
