@@ -13,7 +13,7 @@
   kami:engine vocabulary exposed through kotoba's single (module \"kotoba\")
   ABI, so a `.kotoba` guest can drive real game logic.
 
-  PORTABLE (.cljc) per the repo-wide runtime priority (CLAUDE.md
+  PORTABLE (.cljc) per the repo-wide runtime priority (AGENTS.md
   2026-07-07: kotoba wasm > clojurewasm > ClojureScript > nbb, JVM last
   resort). The guest is already kotoba wasm; this HOST's canonical
   non-JVM runtime is ClojureScript — the whole ECS core below is plain
