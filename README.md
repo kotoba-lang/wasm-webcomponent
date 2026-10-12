@@ -603,7 +603,7 @@ silently.
     `setTimeout`) can preempt it — use `KotobaWasmWorkerElement` for
     anything untrusted or capability-bearing.
   - A follow-up with true per-instruction fuel (mirroring `fuel-listener`
-    exactly) would require the `kotoba-lang/compiler` wasm backend to
+    exactly) would require the `kotoba-lang/amu` wasm backend to
     inject cooperative fuel-check instructions at loop back-edges/call
     sites — a compiler change, out of this repo's scope, tracked
     separately from this host-side interim fix.
