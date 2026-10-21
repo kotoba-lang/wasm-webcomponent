@@ -2,11 +2,12 @@
 
 Tracking: [JUN-14](https://linear.app/kotobalabs/issue/JUN-14).
 
-This recovery is presented as a draft stacked on the legacy-CI retirement
-[PR #25](https://github.com/kotoba-lang/wasm-webcomponent/pull/25). That
-retirement's main merge is waiting for explicit human approval after an
-automatic approval-review rejection. Keep both changes unmerged while that
-approval is pending; the stacked recovery does not bypass the hold.
+This recovery is a draft targeting main. The legacy-CI retirement
+[PR #25](https://github.com/kotoba-lang/wasm-webcomponent/pull/25) merged as
+`1d36f9936e0e5af61d3f3064815bb46f6c4d4143` after the owner's explicit approval
+to remove the five old jobs while native replacement gates remain unqualified.
+That dependency is resolved. The recovery's integration and qualification
+requirements below remain open; #25's approval does not qualify this module.
 
 ## Provenance
 
