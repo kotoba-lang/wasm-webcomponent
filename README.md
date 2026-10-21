@@ -13,6 +13,16 @@ kototama's own `web/` imports from here rather than duplicating the code.
 Guest binaries are produced by [`amu`](https://github.com/kotoba-lang/amu)
 (編む), not by this host.
 
+## CDCI status
+
+The former GitHub Actions workflow used Node 22, npm and NBB/KBB-based
+harnesses. It has been retired under the Amu selfhost / Kotoba-only CDCI
+direction. No replacement success status or native qualification is claimed.
+Existing host fixtures and the verification commands described below remain
+porting inventory; their historical results do not qualify native CDCI.
+The replacement controller and gates must run through canonical Kotoba and
+Amu selfhost, with loaderless native artifacts and recorded provenance.
+
 ## Usage
 
 Zero-import module:
