@@ -27,7 +27,7 @@ try {
       (let [r (runtime/wasm-binary (runtime/read-file s :kotoba) (edn/read-string (slurp p)))]
         (assert (:kotoba.wasm/ok? r))
         (java.nio.file.Files/write (java.nio.file.Paths/get o (make-array String 0)) ^bytes (:kotoba.wasm/binary r) (make-array java.nio.file.OpenOption 0))))`;
-  execFileSync('clojure',['-M:dev','-e',expression],{cwd:compilerRepo,stdio:'ignore'});
+  execFileSync('clojure',['-M:dev','-i','tools/cljk_loader.cljk','-e',expression],{cwd:compilerRepo,stdio:'ignore'});
   const key=readFileSync(keyPath,'utf8'),cert=readFileSync(certPath,'utf8');
   const server=new Worker(`
     const {parentPort,workerData}=require('node:worker_threads');const net=require('node:net'),tls=require('node:tls');

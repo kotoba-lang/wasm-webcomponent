@@ -833,8 +833,8 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   // defaults that never open sockets; opts.transportProvider may override
   // individual methods. Handles are BigInt; 0n means deny/missing.
   // Quota: maxTransportConnections (default 0 deny-by-default).
-  if (opts.runtime === 'node') {
-    const tp = opts.transportProvider || {};
+  if (opts.runtime === 'node' || opts.transport || opts.transportProvider) {
+    const tp = opts.transportProvider || opts.transport || {};
     const transportState = { nextHandle: 1n, open: new Set() };
     const takeHandle = () => {
       if (transportState.open.size >= c.limits.maxTransportConnections) return 0n;
@@ -943,7 +943,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   // ── PostgreSQL pool / wire / cancel / SCRAM Node inject (T8.4) ─────
   // Browser: intentional absence. Node: fail-closed defaults (no real PG);
   // optional opts.pgPoolProvider / opts.pgWireProvider / opts.scramCredentials.
-  if (opts.runtime === 'node') {
+  if (opts.runtime === 'node' || typeof opts.credentials?.scramSha256 === 'function') {
     const poolP = opts.pgPoolProvider || {};
     const wireP = opts.pgWireProvider || {};
     const denyI32 = () => -1;
@@ -1130,8 +1130,18 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
         try {
           ref = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(refPtr, refLen));
         } catch (_) { return -1; }
-        const allow = opts.scramCredentialAllowlist;
-        if (!(allow instanceof Set) || !allow.has(ref)) return -1;
+        const allowRaw = opts.scramCredentialAllowlist ?? c.limits.scramCredentialAllowlist;
+        const allow = allowRaw instanceof Set ? allowRaw
+          : (Array.isArray(allowRaw) ? new Set(allowRaw) : null);
+        if (!allow || !allow.has(ref)) return -1;
+        if (opts.credentials && typeof opts.credentials.scramSha256 === 'function') {
+          const salt = readBytes(saltPtr, saltLen);
+          const authMessage = readBytes(authPtr, authLen);
+          const proof = opts.credentials.scramSha256({ credentialRef: ref, salt, iterations, authMessage });
+if (!(proof instanceof Uint8Array) || proof.length < 64 || proof.length > outCap) return -1;
+          state.scramProofs = (state.scramProofs || 0) + 1;
+          return writeBytes(outPtr, outCap, proof);
+        }
         let creds = opts.scramCredentials;
         if (typeof creds === 'function') {
           try { creds = creds(); } catch (_) { return -1; }
@@ -1368,7 +1378,9 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   // see urlAllowed above) -- same in-band -1 fail-closed convention.
   const httpPostSync =
     typeof opts.httpPost === 'function'
-      ? opts.httpPost
+      ? (opts.httpPost.length >= 2
+          ? opts.httpPost
+          : (u, b) => opts.httpPost({ url: u, body: b, maxBytes: b.length, redirect: 'manual' }))
       : (opts.httpPostBridge && typeof opts.httpPostBridge.postSync === 'function'
           ? (url, body) => opts.httpPostBridge.postSync(url, body)
           : null);

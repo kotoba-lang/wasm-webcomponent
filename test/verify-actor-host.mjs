@@ -70,7 +70,7 @@ check(
 const granted = validateImportSurface(['clock-monotonic', 'sha256-hex'], hostCaps({ grants: ['clock-monotonic', 'sha256-hex'] }));
 check(granted.ok === true, `clock-monotonic+sha256-hex granted and requested both pass validation (got ${JSON.stringify(granted.errors)})`);
 check(
-  IMPORT_SURFACE.length === 54 &&
+  IMPORT_SURFACE.length === 63 &&
     IMPORT_SURFACE.some(({ id }) => id === 'http-fetch') &&
     IMPORT_SURFACE.some(({ id }) => id === 'http-post-headers') &&
     IMPORT_SURFACE.some(({ id }) => id === 'transport-connect') &&

@@ -35,7 +35,7 @@ try {
         (assert (:kotoba.wasm/ok? result))
         (java.nio.file.Files/write (java.nio.file.Paths/get output (make-array String 0))
           ^bytes (:kotoba.wasm/binary result) (make-array java.nio.file.OpenOption 0))))`;
-  execFileSync('clojure', ['-M:dev', '-e', expression], { cwd: compilerRepo, stdio: 'ignore' });
+  execFileSync('clojure', ['-M:dev', '-i', 'tools/cljk_loader.cljk', '-e', expression], { cwd: compilerRepo, stdio: 'ignore' });
   const key = readFileSync(keyPath, 'utf8');
   const cert = readFileSync(certPath, 'utf8');
   const server = new Worker(`
