@@ -172,6 +172,15 @@ export const IMPORT_SURFACE = [
   { id: 'pg-open-scram-cancellable-random', category: 'network', effects: new Set(['network']) },
   { id: 'pg-cancel-authority-use', category: 'network', effects: new Set(['network']) },
   { id: 'pg-close-scram', category: 'network', effects: new Set(['network']) },
+  { id: 'http-write', category: 'component-http', effects: new Set(['network', 'write']) },
+  { id: 'http-read', category: 'component-http', effects: new Set(['network']) },
+  { id: 'http-close', category: 'component-http', effects: new Set(['network', 'write']) },
+  { id: 'http-get', category: 'component-http', effects: new Set(['network', 'write']) },
+  { id: 'db-open', category: 'component-database', effects: new Set(['network']) },
+  { id: 'db-write', category: 'component-database', effects: new Set(['network', 'write']) },
+  { id: 'db-read', category: 'component-database', effects: new Set(['network']) },
+  { id: 'db-close', category: 'component-database', effects: new Set(['network', 'write']) },
+  { id: 'db-exchange', category: 'component-database', effects: new Set(['network', 'write']) },
 ];
 
 const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
@@ -179,6 +188,17 @@ const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
 export const DEFAULT_RUNTIME_LIMITS = {
   maxImports: IMPORT_SURFACE.length,
   maxHttpPosts: 0,
+  maxHttpGets: 0,
+  httpUrlAllowlist: [],
+  transportEndpointAllowlist: [],
+  transportResolvedAddressAllowlist: [],
+  maxTransportConnectMs: 5000,
+  maxTransportReadMs: 5000,
+  maxTransportReadBytes: 1048576,
+  maxTransportWriteBytes: 1048576,
+  maxPgCancelRequests: 0,
+  maxScramProofs: 0,
+  maxPgCancelHandles: 0,
   maxHttpFetches: 0,
   maxLlmInfers: 0,
   // Finite kagi-sign invocation quota. Default 0 = deny-by-default.
@@ -316,6 +336,11 @@ export function validateImportSurface(requestedIds, caps) {
       actual: httpPosts + headerPosts,
     });
   }
+ const httpGets = known.filter((id) => id === 'http-get').length;
+ if (httpGets > c.limits.maxHttpGets) {
+   errors.push({ error: 'limit/max-http-gets', limit: c.limits.maxHttpGets, actual: httpGets });
+ }
+
   const llmInfers = known.filter((id) => id === 'llm-infer').length;
   if (llmInfers > c.limits.maxLlmInfers) {
     errors.push({ error: 'limit/max-llm-infers', limit: c.limits.maxLlmInfers, actual: llmInfers });
@@ -341,6 +366,38 @@ export function validateImportSurface(requestedIds, caps) {
     errors.push({ error: 'limit/write-imports', imports: writeImports });
   }
   return { ok: errors.length === 0, requested: known, granted: c.grants, limits: c.limits, errors };
+}
+
+function httpUrlAllowed(allowlist, requestUrl) {
+  if (!Array.isArray(allowlist) || allowlist.length === 0) return false;
+  let requested;
+  try {
+    requested = new URL(requestUrl);
+    if (requested.protocol !== 'https:' || requested.username || requested.password || requested.hash) return false;
+  } catch (_) {
+    return false;
+  }
+  return allowlist.some((entry) => {
+    try {
+      const scope = new URL(entry);
+      if (scope.protocol !== 'https:' || scope.username || scope.password || scope.search || scope.hash) return false;
+      const scopePort = Number(scope.port || 443);
+      const scopePath = scope.pathname || '/';
+      const pathAllowed = requested.pathname === scopePath ||
+        (scopePath.endsWith('/') ? requested.pathname.startsWith(scopePath) : requested.pathname.startsWith(`${scopePath}/`));
+      return scope.hostname === requested.hostname &&
+        scopePort === Number(requested.port || 443) && pathAllowed;
+    } catch (_) {
+      return false;
+    }
+  });
+}
+
+function httpGetAllowed(allowlist, host, port, requestPath) {
+  if (typeof host !== 'string' || !/^[A-Za-z0-9.-]+$/.test(host) ||
+      !Number.isInteger(port) || port < 1 || port > 65535 ||
+      typeof requestPath !== 'string' || !requestPath.startsWith('/')) return false;
+  return httpUrlAllowed(allowlist, `https://${host}:${port}${requestPath}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -682,7 +739,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   const store = opts.store || inMemoryStore();
   const state = {
     logReadBytes: 0, logWriteBytes: 0, randomBytes: 0, httpPosts: 0, httpFetches: 0,
-    llmInfers: 0, kagiSigns: 0,
+    llmInfers: 0, kagiSigns: 0, httpGets: 0
   };
   const available = new Set(validation.requested);
   const authority = opts.authority || sessionAuthority(c.grants);
@@ -776,8 +833,8 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   // defaults that never open sockets; opts.transportProvider may override
   // individual methods. Handles are BigInt; 0n means deny/missing.
   // Quota: maxTransportConnections (default 0 deny-by-default).
-  if (opts.runtime === 'node') {
-    const tp = opts.transportProvider || {};
+  if (opts.runtime === 'node' || opts.transport || opts.transportProvider) {
+    const tp = opts.transportProvider || opts.transport || {};
     const transportState = { nextHandle: 1n, open: new Set() };
     const takeHandle = () => {
       if (transportState.open.size >= c.limits.maxTransportConnections) return 0n;
@@ -886,7 +943,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   // ── PostgreSQL pool / wire / cancel / SCRAM Node inject (T8.4) ─────
   // Browser: intentional absence. Node: fail-closed defaults (no real PG);
   // optional opts.pgPoolProvider / opts.pgWireProvider / opts.scramCredentials.
-  if (opts.runtime === 'node') {
+  if (opts.runtime === 'node' || typeof opts.credentials?.scramSha256 === 'function') {
     const poolP = opts.pgPoolProvider || {};
     const wireP = opts.pgWireProvider || {};
     const denyI32 = () => -1;
@@ -1040,6 +1097,10 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
         if (typeof opts.pgCancelRegister === 'function') {
           try { return opts.pgCancelRegister(handle, a, b) | 0; } catch (_) { return 0; }
         }
+        const tpCancel = opts.transportProvider || opts.transport;
+        if (tpCancel && typeof tpCancel.registerCancel === 'function') {
+          try { return tpCancel.registerCancel(handle, a, b) | 0; } catch (_) { return 0; }
+        }
         // non-TLS handle → 0
         return 0;
       };
@@ -1049,6 +1110,10 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
         ensureGranted('pg-cancel');
         if (typeof opts.pgCancel === 'function') {
           try { return opts.pgCancel(handle | 0) | 0; } catch (_) { return -1; }
+        }
+        const tpCancel = opts.transportProvider || opts.transport;
+        if (tpCancel && typeof tpCancel.cancel === 'function') {
+          try { return tpCancel.cancel(handle) | 0; } catch (_) { return -1; }
         }
         return -1;
       };
@@ -1073,8 +1138,18 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
         try {
           ref = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(refPtr, refLen));
         } catch (_) { return -1; }
-        const allow = opts.scramCredentialAllowlist;
-        if (!(allow instanceof Set) || !allow.has(ref)) return -1;
+        const allowRaw = opts.scramCredentialAllowlist ?? c.limits.scramCredentialAllowlist;
+        const allow = allowRaw instanceof Set ? allowRaw
+          : (Array.isArray(allowRaw) ? new Set(allowRaw) : null);
+        if (!allow || !allow.has(ref)) return -1;
+        if (opts.credentials && typeof opts.credentials.scramSha256 === 'function') {
+          const salt = readBytes(saltPtr, saltLen);
+          const authMessage = readBytes(authPtr, authLen);
+          const proof = opts.credentials.scramSha256({ credentialRef: ref, salt, iterations, authMessage });
+if (!(proof instanceof Uint8Array) || proof.length < 64 || proof.length > outCap) return -1;
+          state.scramProofs = (state.scramProofs || 0) + 1;
+          return writeBytes(outPtr, outCap, proof);
+        }
         let creds = opts.scramCredentials;
         if (typeof creds === 'function') {
           try { creds = creds(); } catch (_) { return -1; }
@@ -1311,7 +1386,9 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   // see urlAllowed above) -- same in-band -1 fail-closed convention.
   const httpPostSync =
     typeof opts.httpPost === 'function'
-      ? opts.httpPost
+      ? (opts.httpPost.length >= 2
+          ? opts.httpPost
+          : (u, b) => opts.httpPost({ url: u, body: b, maxBytes: b.length, redirect: 'manual' }))
       : (opts.httpPostBridge && typeof opts.httpPostBridge.postSync === 'function'
           ? (url, body) => opts.httpPostBridge.postSync(url, body)
           : null);
@@ -1438,6 +1515,31 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       return writeBytes(outPtr, outCap, utf8Encoder.encode(value));
     };
   }
+
+  // High-level component HTTP capability. Browser tabs and Node cannot expose
+  // raw synchronous sockets safely, but a caller may inject a synchronous
+  // fetch/SAB/worker bridge. The callback receives an exact endpoint and a
+  // manual-redirect requirement; absence leaves the Wasm import unlinked.
+    if (available.has('http-get') && typeof opts.httpGet === 'function') {
+    fns.http_get = (hostPtr, hostLen, port, pathPtr, pathLen, outPtr, outCap) => {
+      ensureGranted('http-get');
+      const host = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(hostPtr, hostLen));
+      const requestPath = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(pathPtr, pathLen));
+      if (state.httpGets >= c.limits.maxHttpGets ||
+          !httpGetAllowed(c.limits.httpUrlAllowlist, host, port, requestPath)) return -1;
+      const reply = opts.httpGet({
+        host,
+        port,
+        path: requestPath,
+        maxBytes: outCap,
+        redirect: 'manual',
+      });
+      if (!(reply instanceof Uint8Array)) return -1;
+      state.httpGets += 1;
+      return writeBytes(outPtr, outCap, reply);
+    };
+  }
+
 
   return fns;
 }

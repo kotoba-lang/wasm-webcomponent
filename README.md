@@ -212,6 +212,8 @@ KotobaWasmElement.define('my-amu-clock', {
   deliberately have no ambient synchronous default — see "Scope" below.
   See `test/verify-http-post.mjs`
   + `examples/http-post-echo.wasm`.
+
+- `src/component-linker.js` / `src/http-sab-bridge.js` / `src/node-*-provider.js` — the bounded component provider runtime: `createComponentLinks` binds kotoba components to exact-endpoint providers; the SAB HTTP bridge (`attachSabHttpGetBridge`/`attachSabHttpPostBridge`) gives browser components synchronous fetch over SharedArrayBuffer (COOP/COEP required, default-denied, request-count bounded, manual redirects, HTTPS host/port/path allowlist); the Node providers (`createNodeCredentialProvider`, `createNodePostgresqlPoolProvider`, `createNodeTransportBroker`) are fail-closed by default with lease-based connection handles and explicit per-method overrides. Proof: `test/verify-node-*.mjs`, `test/verify-actor-host.mjs`, `test/browser/verify-http-get-sab.mjs`.
 - `src/vendor/` — the actual, unmodified `@noble/curves`/`@noble/hashes`
   source files `actor-host.js`'s ed25519 imports need, copied file-for-file
   (not hand-transcribed) with only bare-specifier import paths patched to
@@ -316,6 +318,7 @@ KotobaWasmElement.define('my-amu-clock', {
   They check the AOT-execution / host-import claims only; they do not
   exercise `KotobaWasmElement`'s DOM/customElements path (no DOM in plain
   Node) — that needs a real browser, see `examples/*/index.html`.
+
   `verify-kami-engine-host.mjs` specifically is the parity proof for
   retiring `kami-script-runtime-rs`'s Rust runtime role: it drives the same
   fixture for the same 300 ticks and asserts the exact same entity counts
@@ -343,6 +346,101 @@ KotobaWasmElement.define('my-amu-clock', {
   Playwright launch helper that resolves the full (non-headless-shell)
   Chromium binary, and a from-scratch PNG decoder (Node's built-in `zlib`
   only) to read back actual pixel bytes from a canvas screenshot.
+
+Node hosts may opt into the bounded raw transport ABI through
+`createNodeTransportBroker` in `src/node-transport-broker.js` and inject it as
+`actorHostImports(..., {transport: broker})`. The broker owns sockets and
+affine handles in a worker, bridges synchronous Wasm imports with
+SharedArrayBuffer/Atomics, requires exact endpoint and resolved-address
+allowlists, enforces finite connection/read/write/time quotas, and always
+verifies TLS certificates and the exact SNI name. Its default policy permits
+zero connections; browser hosts do not expose raw transport.
+
+`instantiateKotobaComponent` compiles/instantiates a low-level provider, while
+`instantiateLinkedKotobaComponent` links a consumer to that provider across
+independent linear memories. The linker copies only manifest-declared buffers
+through a 64 KiB scratch page, rejects overflow/reentrancy/missing exports, and
+meters `http-get` attempts. `test/verify-node-http-component.mjs` compiles the
+repository's real `providers/http_transport.kotoba` and
+`providers/http_consumer.kotoba`, then verifies the complete consumer →
+provider → worker/SAB → TLS server path.
+
+The same linker exposes the five bounded generic DB bindings from
+`DB_LINKS`. `test/verify-node-db-component.mjs` compiles the real framed DB
+provider and consumer and exchanges a length-prefixed frame over verified TLS.
+PostgreSQL protocol, SCRAM credential custody, pooling, and cancellation remain
+separate opt-in layers; generic DB linkage does not imply those authorities.
+
+Node also provides the purpose-bound native TCB extensions required by
+`pg_scram.kotoba`: `createNodeCredentialProvider` resolves only allowlisted
+credential references and returns SCRAM client-proof plus server-signature,
+never the password; the transport broker turns BackendKeyData into a bounded
+one-shot cancellation handle that can send only PostgreSQL's fixed 16-byte
+CancelRequest to the TLS session's pinned peer. Tests execute the RFC vector
+through the compiled `.kotoba` provider and verify cancel wire bytes and
+double-use denial.
+
+The first PostgreSQL session bindings are also live on Node. `PG_SESSION_LINKS`
+bridges `pg-open`, `pg-query`, and `db-close`; its E2E test compiles the real
+provider and consumer, validates the plaintext PostgreSQL SSLRequest, upgrades
+the same affine connection to verified TLS, validates StartupMessage framing,
+and performs a SimpleQuery through ReadyForQuery.
+
+Multi-provider consumers are supported by `instantiateLinkedKotobaComponents`.
+The transaction E2E links `db_transport.kotoba` and `pg_scram.kotoba` into the
+separate `pg_transaction_consumer.kotoba`, completes SCRAM-SHA-256 without
+exporting its password, and verifies PostgreSQL transaction metadata across
+`BEGIN` (`T`) → division error (`E`, SQLSTATE `22012`) → `ROLLBACK` (`I`).
+
+Named prepared statements are linked through `PG_PREPARED_LINKS`. The compiled
+prepared consumer is checked at the wire boundary: Parse contains the fixed
+`$1/$2` query, potentially hostile text remains only in Bind parameter bytes,
+an expected `22P02` does not poison the session, a later execution succeeds,
+and CloseStatement receives CloseComplete.
+
+Typed prepared statements use `PG_TYPED_PREPARED_LINKS`. Their compiled
+consumer proves that Parse carries exactly three `int4` OIDs, Bind preserves
+text/text/binary format codes, SQL NULL stays the `-1` length sentinel, binary
+`int4` 22 remains four big-endian bytes, and hostile text remains a parameter.
+
+Named cursors use `PG_PORTAL_LINKS` inside an explicit transaction. The
+compiled portal consumer proves Parse/Bind name separation, Execute row bounds,
+`PortalSuspended` followed by a resumed Execute and `CommandComplete`, and
+independent ClosePortal/CloseStatement completion over verified TLS + SCRAM.
+
+`PG_BATCH_LINKS` keeps each prepared statement name and parameter block in
+separate bounded buffers while emitting multiple Bind/Execute pairs under one
+Sync. The compiled batch consumer verifies two successful items, a middle
+`22012` error with ReadyForQuery recovery, a later successful reuse, and close.
+
+`PG_SESSION_RESET_LINKS` performs `ROLLBACK` followed by `DISCARD ALL`. Its
+compiled consumer verifies transaction cleanup, application-name reset,
+temporary-table removal, prepared-statement deallocation (`26000`), and reuse
+of the same verified TLS + SCRAM connection.
+
+`PG_COPY_LINKS` supports COPY IN and COPY OUT without exposing the socket. The
+compiled consumer proves CopyInResponse → bounded CopyData → CopyDone and a
+three-row CopyOutResponse/Data/Done stream, then validates the resulting table
+through the same verified TLS + SCRAM session.
+
+`createNodePostgresqlPoolProvider` is the bounded native runtime boundary for
+opaque pool membership and affine lease tokens; PostgreSQL protocol, session
+reset, TLS and credentials remain in the compiled Kotoba providers below it.
+The compiled multi-pool consumer verifies two real TLS/SCRAM connections,
+saturation, monotonic non-revivable leases, release-time reset, fixed stats,
+idle-only health probes, busy close, forced drain accounting, and final close.
+
+The remaining PostgreSQL compatibility imports are also explicit component
+links: the legacy one-shot query performs SSLRequest before verified TLS and
+exact-reads AuthOK/Ready; caller-nonce SCRAM retains host-custodied credentials;
+and cancellable SCRAM copies out only an opaque one-shot authority whose
+compiled consumer emits the fixed pinned-peer CancelRequest.
+
+Node `kagi-sign` is available only through a decision-aware trusted adapter.
+The generic host never accepts raw key bytes or a bare signing callback; it
+threads the exact decision set and opaque key reference into `authorizedSign`,
+returns only bounded signature bytes, defaults to zero calls, and enforces a
+finite per-session quota.
 
 ## Run an example
 
