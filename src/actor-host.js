@@ -1097,6 +1097,10 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
         if (typeof opts.pgCancelRegister === 'function') {
           try { return opts.pgCancelRegister(handle, a, b) | 0; } catch (_) { return 0; }
         }
+        const tpCancel = opts.transportProvider || opts.transport;
+        if (tpCancel && typeof tpCancel.registerCancel === 'function') {
+          try { return tpCancel.registerCancel(handle, a, b) | 0; } catch (_) { return 0; }
+        }
         // non-TLS handle → 0
         return 0;
       };
@@ -1106,6 +1110,10 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
         ensureGranted('pg-cancel');
         if (typeof opts.pgCancel === 'function') {
           try { return opts.pgCancel(handle | 0) | 0; } catch (_) { return -1; }
+        }
+        const tpCancel = opts.transportProvider || opts.transport;
+        if (tpCancel && typeof tpCancel.cancel === 'function') {
+          try { return tpCancel.cancel(handle) | 0; } catch (_) { return -1; }
         }
         return -1;
       };
