@@ -1,7 +1,7 @@
 // Browser-side port of kotoba-lang/kototama's src/kototama/contract.cljc
 // (the pure `actor:host` ABI authority: HostCaps/RuntimeLimits/
 // validate-import-surface) plus a browser-native implementation of the
-// subset of its host imports that a WebAssembly host-import function can
+// subset of its 8 host imports that a WebAssembly host-import function can
 // actually perform SYNCHRONOUSLY (see "Scope" below).
 //
 // Like kgraph.js, this is a from-scratch, dependency-free port, not a
@@ -15,12 +15,6 @@
 // plane. Importing this module must not pull the cljs runtime.
 //
 // ---------------------------------------------------------------------------
-// Scope: pure synchronous imports are implemented directly. Network imports
-// stay unlinked unless the caller supplies an explicit synchronous backend.
-// `http-get` supports an injected worker/SAB bridge, but only with a finite
-// request quota and structured HTTPS host/port/path allowlist. Node may inject
-// the bounded worker/SAB raw transport broker; browsers still cannot. Database,
-// SCRAM, and cancel imports remain unavailable here.
 // Scope (honest R2): 7 of the 9 `actor:host` imports are unconditionally
 // synchronous; `llm-infer` and `http-post` are each conditional, wired via
 // one of:
@@ -50,17 +44,6 @@
 // unmodified, audited `@noble/curves` (see `./vendor/README.md` for
 // provenance and why vendored rather than CDN-imported).
 //
-// Bare `http-post` remains unavailable: `fetch` is
-// real network I/O, not arithmetic, so there's no synchronous-without-async
-// version of it to write or vendor -- it needs either JSPI (Chrome 137+
-// only as of this writing, not yet Firefox/Safari) or a
-// SharedArrayBuffer+Atomics.wait blocking bridge (needs COOP/COEP response
-// headers, which this library's "zero-build-step, CDN-servable as raw
-// static files" deployment model doesn't assume). NOT implemented here, on
-// purpose, not silently skipped: `http_post` is simply absent from
-// `actorHostImports`'s returned import object, so a guest declaring it
-// fails to link with a clear Wasm "unknown import" error, not a confusing
-// runtime crash.
 // `http-post` cannot call `fetch` directly inside a sync host import in a
 // standard browser tab. Paths that ARE implemented (see `http_post` wiring
 // below + `http-post-bridge.js`):
@@ -79,9 +62,6 @@
 //                        WASM round trip in test/verify-actor-host.mjs
 //   - `log_read` / `log_write` -- an injectable synchronous byte store
 //                        (same `store` parameter shape kgraph.js uses)
-//   - conditional `http_get` -- explicit synchronous injection, finite quota,
-//                        structured HTTPS scope; the browser E2E uses a
-//                        COOP/COEP worker+SharedArrayBuffer bridge
 //
 // Field/id names (`clock-monotonic`/`log-write`, not `now`/`log-append!`)
 // match `kotoba-lang/kototama`'s `kototama.contract` and
@@ -107,61 +87,8 @@ export const IMPORT_SURFACE = [
   { id: 'gen-keypair', category: 'identity', effects: new Set(['crypto', 'secret']) },
   { id: 'sign', category: 'identity', effects: new Set(['crypto', 'secret']) },
   { id: 'verify', category: 'identity', effects: new Set(['crypto']) },
-  { id: 'kagi-sign', category: 'identity', effects: new Set(['crypto']) },
   { id: 'sha256-hex', category: 'content-addressing', effects: new Set(['crypto']) },
   { id: 'http-post', category: 'network', effects: new Set(['network']) },
-  { id: 'transport-connect', category: 'transport', effects: new Set(['network']) },
-  { id: 'tls-open', category: 'transport', effects: new Set(['network', 'crypto']) },
-  { id: 'tls-server-end-point', category: 'transport', effects: new Set(['network', 'crypto']) },
-  { id: 'transport-write', category: 'transport', effects: new Set(['network', 'write']) },
-  { id: 'transport-read', category: 'transport', effects: new Set(['network']) },
-  { id: 'transport-close', category: 'transport', effects: new Set(['network', 'write']) },
-  { id: 'http-open', category: 'component-http', effects: new Set(['network']) },
-  { id: 'http-write', category: 'component-http', effects: new Set(['network', 'write']) },
-  { id: 'http-read', category: 'component-http', effects: new Set(['network']) },
-  { id: 'http-close', category: 'component-http', effects: new Set(['network', 'write']) },
-  { id: 'http-get', category: 'component-http', effects: new Set(['network', 'write']) },
-  { id: 'db-open', category: 'component-database', effects: new Set(['network']) },
-  { id: 'db-write', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'db-read', category: 'component-database', effects: new Set(['network']) },
-  { id: 'db-close', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'db-exchange', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-simple-query', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-open', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-query', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-query-state', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-prepare', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-prepare-typed', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-execute-params2', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-execute-params', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-bind-portal', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-fetch-portal', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-close-portal', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-copy-out', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-copy-in', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-execute-batch', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-session-reset', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-pool-open', category: 'component-database', effects: new Set(['network', 'secret', 'write']) },
-  { id: 'pg-pool-acquire', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-pool-query', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-pool-release', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-pool-stats', category: 'component-database', effects: new Set(['read']) },
-  { id: 'pg-pool-health', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-pool-drain', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-pool-close', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-close-statement', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'pg-open-scram', category: 'component-database', effects: new Set(['network', 'secret', 'write']) },
-  { id: 'pg-open-scram-random', category: 'component-database', effects: new Set(['network', 'secret', 'write']) },
-  { id: 'pg-open-scram-cancellable-random', category: 'component-database', effects: new Set(['network', 'secret', 'write']) },
-  { id: 'pg-cancel-authority-use', category: 'component-database', effects: new Set(['network', 'secret', 'write']) },
-  { id: 'pg-close-scram', category: 'component-database', effects: new Set(['network', 'write']) },
-  { id: 'scram-sha256', category: 'credential-crypto', effects: new Set(['crypto', 'secret', 'write']) },
-  { id: 'pg-cancel-register', category: 'credential-crypto', effects: new Set(['network', 'secret', 'write']) },
-  { id: 'pg-cancel', category: 'credential-crypto', effects: new Set(['network', 'secret', 'write']) },
-  { id: 'log-read', category: 'storage', effects: new Set(['storage']) },
-  { id: 'log-write', category: 'storage', effects: new Set(['storage', 'write']) },
-  { id: 'clock-monotonic', category: 'clock', effects: new Set(['clock']) },
-  { id: 'random-bytes', category: 'randomness', effects: new Set(['crypto', 'write']) },
   { id: 'http-fetch', category: 'network', effects: new Set(['network']) },
   { id: 'log-read', category: 'storage', effects: new Set(['storage']) },
   { id: 'log-write', category: 'storage', effects: new Set(['storage', 'write']) },
@@ -245,6 +172,15 @@ export const IMPORT_SURFACE = [
   { id: 'pg-open-scram-cancellable-random', category: 'network', effects: new Set(['network']) },
   { id: 'pg-cancel-authority-use', category: 'network', effects: new Set(['network']) },
   { id: 'pg-close-scram', category: 'network', effects: new Set(['network']) },
+  { id: 'http-write', category: 'component-http', effects: new Set(['network', 'write']) },
+  { id: 'http-read', category: 'component-http', effects: new Set(['network']) },
+  { id: 'http-close', category: 'component-http', effects: new Set(['network', 'write']) },
+  { id: 'http-get', category: 'component-http', effects: new Set(['network', 'write']) },
+  { id: 'db-open', category: 'component-database', effects: new Set(['network']) },
+  { id: 'db-write', category: 'component-database', effects: new Set(['network', 'write']) },
+  { id: 'db-read', category: 'component-database', effects: new Set(['network']) },
+  { id: 'db-close', category: 'component-database', effects: new Set(['network', 'write']) },
+  { id: 'db-exchange', category: 'component-database', effects: new Set(['network', 'write']) },
 ];
 
 const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
@@ -253,21 +189,16 @@ export const DEFAULT_RUNTIME_LIMITS = {
   maxImports: IMPORT_SURFACE.length,
   maxHttpPosts: 0,
   maxHttpGets: 0,
-  maxTransportConnections: 0,
+  httpUrlAllowlist: [],
+  transportEndpointAllowlist: [],
+  transportResolvedAddressAllowlist: [],
   maxTransportConnectMs: 5000,
   maxTransportReadMs: 5000,
   maxTransportReadBytes: 1048576,
   maxTransportWriteBytes: 1048576,
-  transportEndpointAllowlist: [],
-  transportResolvedAddressAllowlist: [],
-  maxLlmInfers: 0,
-  maxKagiSigns: 0,
+  maxPgCancelRequests: 0,
   maxScramProofs: 0,
   maxPgCancelHandles: 0,
-  maxPgCancelRequests: 0,
-  scramCredentialAllowlist: [],
-  maxRandomBytes: 0,
-  httpUrlAllowlist: [],
   maxHttpFetches: 0,
   maxLlmInfers: 0,
   // Finite kagi-sign invocation quota. Default 0 = deny-by-default.
@@ -405,10 +336,11 @@ export function validateImportSurface(requestedIds, caps) {
       actual: httpPosts + headerPosts,
     });
   }
-  const httpGets = known.filter((id) => id === 'http-get').length;
-  if (httpGets > c.limits.maxHttpGets) {
-    errors.push({ error: 'limit/max-http-gets', limit: c.limits.maxHttpGets, actual: httpGets });
-  }
+ const httpGets = known.filter((id) => id === 'http-get').length;
+ if (httpGets > c.limits.maxHttpGets) {
+   errors.push({ error: 'limit/max-http-gets', limit: c.limits.maxHttpGets, actual: httpGets });
+ }
+
   const llmInfers = known.filter((id) => id === 'llm-infer').length;
   if (llmInfers > c.limits.maxLlmInfers) {
     errors.push({ error: 'limit/max-llm-infers', limit: c.limits.maxLlmInfers, actual: llmInfers });
@@ -416,18 +348,6 @@ export function validateImportSurface(requestedIds, caps) {
   const kagiSigns = known.filter((id) => id === 'kagi-sign').length;
   if (kagiSigns > c.limits.maxKagiSigns) {
     errors.push({ error: 'limit/max-kagi-signs', limit: c.limits.maxKagiSigns, actual: kagiSigns });
-  }
-  const scramProofs = known.filter((id) => id === 'scram-sha256').length;
-  if (scramProofs > c.limits.maxScramProofs) {
-    errors.push({ error: 'limit/max-scram-proofs', limit: c.limits.maxScramProofs, actual: scramProofs });
-  }
-  const cancelRegisters = known.filter((id) => id === 'pg-cancel-register').length;
-  if (cancelRegisters > c.limits.maxPgCancelHandles) {
-    errors.push({ error: 'limit/max-pg-cancel-handles', limit: c.limits.maxPgCancelHandles, actual: cancelRegisters });
-  }
-  const cancels = known.filter((id) => id === 'pg-cancel').length;
-  if (cancels > c.limits.maxPgCancelRequests) {
-    errors.push({ error: 'limit/max-pg-cancel-requests', limit: c.limits.maxPgCancelRequests, actual: cancels });
   }
   const transportConnects = known.filter((id) => id === 'transport-connect').length;
   if (transportConnects > c.limits.maxTransportConnections) {
@@ -818,9 +738,8 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
 
   const store = opts.store || inMemoryStore();
   const state = {
-    logReadBytes: 0, logWriteBytes: 0, randomBytes: 0, httpGets: 0, httpPosts: 0, kagiSigns: 0,
     logReadBytes: 0, logWriteBytes: 0, randomBytes: 0, httpPosts: 0, httpFetches: 0,
-    llmInfers: 0, kagiSigns: 0,
+    llmInfers: 0, kagiSigns: 0, httpGets: 0
   };
   const available = new Set(validation.requested);
   const authority = opts.authority || sessionAuthority(c.grants);
@@ -874,21 +793,6 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
     };
   }
 
-  if (available.has('random-bytes')) {
-    fns.random_bytes = (outPtr, outCap) => {
-      ensureGranted('random-bytes');
-      if (outCap <= 0 || outCap > 4096 || state.randomBytes + outCap > c.limits.maxRandomBytes) return -1;
-      const bytes = new Uint8Array(outCap);
-      if (typeof opts.randomBytes === 'function') {
-        const supplied = opts.randomBytes(outCap);
-        if (!(supplied instanceof Uint8Array) || supplied.length !== outCap) return -1;
-        bytes.set(supplied);
-      } else globalThis.crypto.getRandomValues(bytes);
-      state.randomBytes += outCap;
-      return writeBytes(outPtr, outCap, bytes);
-    };
-  }
-
   if (available.has('sha256-hex')) {
     fns.sha256_hex = (ptr, len, outPtr, outCap) => {
       ensureGranted('sha256-hex');
@@ -898,14 +802,6 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
     };
   }
 
-  if (available.has('kagi-sign') && opts.runtime === 'node' && typeof opts.kagiSigner?.authorizedSign === 'function' &&
-      Array.isArray(opts.kagiDecisions) && opts.kagiDecisions.length > 0) {
-    fns.kagi_sign = (refPtr, refLen, msgPtr, msgLen, outPtr, outCap) => {
-      ensureGranted('kagi-sign');
-      if (state.kagiSigns >= c.limits.maxKagiSigns || refLen <= 0 || refLen > 255 || msgLen < 0 || msgLen > 65536) return -1;
-      try {
-        const ref = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(refPtr, refLen));
-        const signature = opts.kagiSigner.authorizedSign(opts.kagiDecisions, ref, readBytes(msgPtr, msgLen));
   // `(ref-ptr ref-len msg-ptr msg-len out-ptr out-cap) -> written|-1`.
   // Decision-aware trusted adapter only — links when opts.runtime === 'node'
   // and opts.kagiSigner.authorizedSign + non-empty opts.kagiDecisions are set.
@@ -926,120 +822,6 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
         const written = writeBytes(outPtr, outCap, signature);
         if (written >= 0) state.kagiSigns += 1;
         return written;
-      } catch (_) { return -1; }
-    };
-  }
-
-  if (available.has('http-post') && typeof opts.httpPost === 'function') {
-    fns.http_post = (urlPtr, urlLen, bodyPtr, bodyLen, outPtr, outCap) => {
-      ensureGranted('http-post');
-      if (state.httpPosts >= c.limits.maxHttpPosts) return -1;
-      const url = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(urlPtr, urlLen));
-      if (!httpUrlAllowed(c.limits.httpUrlAllowlist, url)) return -1;
-      const reply = opts.httpPost({
-        url,
-        body: readBytes(bodyPtr, bodyLen),
-        maxBytes: outCap,
-        redirect: 'manual',
-      });
-      if (!(reply instanceof Uint8Array)) return -1;
-      state.httpPosts += 1;
-      return writeBytes(outPtr, outCap, reply);
-    };
-  }
-
-  // High-level component HTTP capability. Browser tabs and Node cannot expose
-  // raw synchronous sockets safely, but a caller may inject a synchronous
-  // fetch/SAB/worker bridge. The callback receives an exact endpoint and a
-  // manual-redirect requirement; absence leaves the Wasm import unlinked.
-  if (available.has('http-get') && typeof opts.httpGet === 'function') {
-    fns.http_get = (hostPtr, hostLen, port, pathPtr, pathLen, outPtr, outCap) => {
-      ensureGranted('http-get');
-      const host = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(hostPtr, hostLen));
-      const requestPath = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(pathPtr, pathLen));
-      if (state.httpGets >= c.limits.maxHttpGets ||
-          !httpGetAllowed(c.limits.httpUrlAllowlist, host, port, requestPath)) return -1;
-      const reply = opts.httpGet({
-        host,
-        port,
-        path: requestPath,
-        maxBytes: outCap,
-        redirect: 'manual',
-      });
-      if (!(reply instanceof Uint8Array)) return -1;
-      state.httpGets += 1;
-      return writeBytes(outPtr, outCap, reply);
-    };
-  }
-
-  // Node may inject a worker/SAB broker implementing the bounded raw
-  // transport ABI. Browser callers leave this absent. Opaque handles and all
-  // socket/TLS state remain owned by the broker worker.
-  if (opts.transport) {
-    const transport = opts.transport;
-    if (available.has('transport-connect') && typeof transport.connect === 'function') {
-      fns.transport_connect = (hostPtr, hostLen, port) => {
-        ensureGranted('transport-connect');
-        try { return transport.connect(new TextDecoder('utf-8', { fatal: true }).decode(readBytes(hostPtr, hostLen)), port); }
-        catch (_) { return 0n; }
-      };
-    }
-    if (available.has('tls-open') && typeof transport.tlsOpen === 'function') {
-      fns.tls_open = (handle, namePtr, nameLen) => {
-        ensureGranted('tls-open');
-        try { return transport.tlsOpen(handle, new TextDecoder('utf-8', { fatal: true }).decode(readBytes(namePtr, nameLen))); }
-        catch (_) { return 0n; }
-      };
-    }
-    if (available.has('tls-server-end-point') && typeof transport.tlsServerEndPoint === 'function') {
-      fns.tls_server_end_point = (handle, outPtr, outCap) => {
-        ensureGranted('tls-server-end-point');
-        const bytes = transport.tlsServerEndPoint(handle, outCap);
-        return bytes instanceof Uint8Array ? writeBytes(outPtr, outCap, bytes) : -1;
-      };
-    }
-    if (available.has('transport-write') && typeof transport.write === 'function') {
-      fns.transport_write = (handle, ptr, len) => {
-        ensureGranted('transport-write');
-        return transport.write(handle, readBytes(ptr, len));
-      };
-    }
-    if (available.has('transport-read') && typeof transport.read === 'function') {
-      fns.transport_read = (handle, outPtr, outCap) => {
-        ensureGranted('transport-read');
-        const bytes = transport.read(handle, outCap);
-        return bytes instanceof Uint8Array ? writeBytes(outPtr, outCap, bytes) : -1;
-      };
-    }
-    if (available.has('transport-close') && typeof transport.close === 'function') {
-      fns.transport_close = (handle) => { ensureGranted('transport-close'); return transport.close(handle); };
-    }
-    if (available.has('pg-cancel-register') && typeof transport.registerCancel === 'function') {
-      fns.pg_cancel_register = (handle, pid, secret) => {
-        ensureGranted('pg-cancel-register'); return transport.registerCancel(handle, pid, secret);
-      };
-    }
-    if (available.has('pg-cancel') && typeof transport.cancel === 'function') {
-      fns.pg_cancel = (handle) => { ensureGranted('pg-cancel'); return transport.cancel(handle); };
-    }
-  }
-
-  if (available.has('scram-sha256') && typeof opts.credentials?.scramSha256 === 'function') {
-    fns.scram_sha256 = (refPtr, refLen, saltPtr, saltLen, iterations,
-      authPtr, authLen, outPtr, outCap) => {
-      ensureGranted('scram-sha256');
-      if (outCap < 64) return -1;
-      try {
-        const credentialRef = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(refPtr, refLen));
-        if (!c.limits.scramCredentialAllowlist.includes(credentialRef)) return -1;
-        const result = opts.credentials.scramSha256({ credentialRef,
-          salt: readBytes(saltPtr, saltLen), iterations,
-          authMessage: readBytes(authPtr, authLen) });
-        return result instanceof Uint8Array && result.length === 64 ? writeBytes(outPtr, outCap, result) : -1;
-      } catch (_) { return -1; }
-    };
-  }
-
       } catch (_) {
         return -1;
       }
@@ -1713,6 +1495,31 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       return writeBytes(outPtr, outCap, utf8Encoder.encode(value));
     };
   }
+
+  // High-level component HTTP capability. Browser tabs and Node cannot expose
+  // raw synchronous sockets safely, but a caller may inject a synchronous
+  // fetch/SAB/worker bridge. The callback receives an exact endpoint and a
+  // manual-redirect requirement; absence leaves the Wasm import unlinked.
+    if (available.has('http-get') && typeof opts.httpGet === 'function') {
+    fns.http_get = (hostPtr, hostLen, port, pathPtr, pathLen, outPtr, outCap) => {
+      ensureGranted('http-get');
+      const host = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(hostPtr, hostLen));
+      const requestPath = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(pathPtr, pathLen));
+      if (state.httpGets >= c.limits.maxHttpGets ||
+          !httpGetAllowed(c.limits.httpUrlAllowlist, host, port, requestPath)) return -1;
+      const reply = opts.httpGet({
+        host,
+        port,
+        path: requestPath,
+        maxBytes: outCap,
+        redirect: 'manual',
+      });
+      if (!(reply instanceof Uint8Array)) return -1;
+      state.httpGets += 1;
+      return writeBytes(outPtr, outCap, reply);
+    };
+  }
+
 
   return fns;
 }
