@@ -8,6 +8,12 @@
 // compiled build of the CLJC source -- this repo stays zero-build-step,
 // CDN-servable as raw ES modules (see README).
 //
+// Amu wasm32-kotoba-v1 guests import `kotoba:cap`/`call` (i64,i64)->i64,
+// not `actor:host`. That host lives in ClojureScript
+// (`src-cljs/kotoba/kotoba_cap.cljk` → `src/kotoba-cap.js`), not here —
+// new host surface is cljs; this file stays the legacy hand-JS actor:host
+// plane. Importing this module must not pull the cljs runtime.
+//
 // ---------------------------------------------------------------------------
 // Scope: pure synchronous imports are implemented directly. Network imports
 // stay unlinked unless the caller supplies an explicit synchronous backend.
@@ -15,6 +21,20 @@
 // request quota and structured HTTPS host/port/path allowlist. Node may inject
 // the bounded worker/SAB raw transport broker; browsers still cannot. Database,
 // SCRAM, and cancel imports remain unavailable here.
+// Scope (honest R2): 7 of the 9 `actor:host` imports are unconditionally
+// synchronous; `llm-infer` and `http-post` are each conditional, wired via
+// one of:
+//   (A) opts.httpPost / opts.llmInfer — sync inject (Node mock / blocking backend)
+//   (B) opts.httpPostBridge / opts.llmInferBridge+llmInferUrl —
+//       SharedArrayBuffer + Atomics.wait (requires crossOriginIsolated /
+//       COOP+COEP headers). `llm-infer`'s bridge path reuses the identical
+//       bridge shape `http-post` uses (often the SAME bridge instance) --
+//       both are "sync host-import needs real async network I/O", solved
+//       once. `llmInferUrl` must point at a developer-controlled proxy, NOT
+//       a real LLM provider directly -- a browser tab can never hold a
+//       provider API key without shipping it to every visitor.
+//   (C) JSPI note — WebAssembly Promise Integration is Chrome-flagged;
+//       not wired as default until multi-engine (use inject until then).
 //
 // A WebAssembly host-import function called from a running guest MUST
 // return synchronously -- there is no `await` inside a Wasm call in a
@@ -41,6 +61,13 @@
 // `actorHostImports`'s returned import object, so a guest declaring it
 // fails to link with a clear Wasm "unknown import" error, not a confusing
 // runtime crash.
+// `http-post` cannot call `fetch` directly inside a sync host import in a
+// standard browser tab. Paths that ARE implemented (see `http_post` wiring
+// below + `http-post-bridge.js`):
+//   - inject: opts.httpPost(url, bodyUint8) => Uint8Array|null  (Node/tests)
+//   - SAB/COOP: opts.httpPostBridge worker (Atomics.wait on SharedArrayBuffer)
+// JSPI (Chrome-only Promise Integration) is documented but not the default
+// wire — guests that request `http_post` without a path still fail to link.
 //
 // Implemented (all genuinely synchronous):
 //   - `clock_monotonic` -- `Date.now()`
@@ -135,6 +162,19 @@ export const IMPORT_SURFACE = [
   { id: 'log-write', category: 'storage', effects: new Set(['storage', 'write']) },
   { id: 'clock-monotonic', category: 'clock', effects: new Set(['clock']) },
   { id: 'random-bytes', category: 'randomness', effects: new Set(['crypto', 'write']) },
+  { id: 'http-fetch', category: 'network', effects: new Set(['network']) },
+  { id: 'log-read', category: 'storage', effects: new Set(['storage']) },
+  { id: 'log-write', category: 'storage', effects: new Set(['storage', 'write']) },
+  { id: 'clock-monotonic', category: 'clock', effects: new Set(['clock']) },
+  // Bounded OS/Web Crypto CSPRNG fill (host-parity L5 / kototama tender
+  // `:random-bytes`). Default `maxRandomBytes` is 0 — deny-by-default until
+  // HostCaps raises the quota (same pattern as maxHttpPosts / maxLlmInfers).
+  { id: 'random-bytes', category: 'randomness', effects: new Set(['crypto', 'write']) },
+  // Decision-aware trusted-adapter sign (host-parity L5 / T8.4).
+  // Key never enters the guest; default maxKagiSigns 0 deny-by-default.
+  // Node-only inject via opts.kagiSigner + opts.kagiDecisions; browser
+  // intentional absence (native boundary).
+  { id: 'kagi-sign', category: 'identity', effects: new Set(['crypto']) },
   // `llm-infer` (`llm/infer`, capability id 225 in kotoba-core-contracts'
   // capability_contract.edn; kototama.tender's Anthropic Messages API
   // call). Unlike `http-post`, this ISN'T fundamentally un-implementable
@@ -147,6 +187,64 @@ export const IMPORT_SURFACE = [
   // implementation exists" honesty `http-post`'s comment above documents,
   // just environment-dependent instead of universally absent.
   { id: 'llm-infer', category: 'llm', effects: new Set(['network']) },
+  // Codec imports (ADR-2607230943 second wave). Pure computation, no
+  // network/DOM dependency -- a faithful byte-for-byte JS port of
+  // kototama.tender's (JVM) flat-pairs -> CBOR/JSON encoders and bounded
+  // JSON string-field scan, so they link in a plain browser tab (no
+  // SAB/Worker bridge needed, unlike http-post/llm-infer). See the
+  // `parseFlatPairs`/`treeNodeToCbor`/`treeNodeToJson`/`jsonStringFieldValue`
+  // helpers below.
+  { id: 'cbor-encode', category: 'codec', effects: new Set() },
+  { id: 'json-encode', category: 'codec', effects: new Set() },
+  { id: 'json-extract-field', category: 'codec', effects: new Set() },
+  { id: 'http-post-headers', category: 'network', effects: new Set(['network']) },
+  // Transport/TLS (T8.4 Node inject path). Browser intentional absence —
+  // native boundary (same honesty as kagi-sign). Node wires fail-closed
+  // defaults and optional opts.transportProvider overrides; no real sockets
+  // unless a provider inject is supplied. Matches kototama.guest field names.
+  { id: 'transport-connect', category: 'network', effects: new Set(['network']) },
+  { id: 'tls-open', category: 'network', effects: new Set(['network']) },
+  { id: 'tls-server-end-point', category: 'network', effects: new Set(['network']) },
+  { id: 'transport-write', category: 'network', effects: new Set(['network']) },
+  { id: 'transport-read', category: 'network', effects: new Set(['network']) },
+  { id: 'transport-close', category: 'network', effects: new Set(['network']) },
+  // PostgreSQL pool / wire / cancel / SCRAM (T8.4 Node inject). Browser
+  // intentional absence. Node: fail-closed defaults; optional
+  // opts.pgPoolProvider / opts.pgWireProvider / opts.scramCredentials.
+  { id: 'pg-pool-open', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-acquire', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-query', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-pool-release', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-stats', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-health', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-drain', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-pool-close', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-open', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-query', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-simple-query', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-cancel-register', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-cancel', category: 'network', effects: new Set(['network']) },
+  { id: 'scram-sha256', category: 'secret', effects: new Set(['secret']) },
+  // Deeper wire + SCRAM session open (T8.4 Node inject residual).
+  // Browser intentional absence; Node fail-closed (match JVM wire provider).
+  { id: 'pg-prepare', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-session-reset', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-close-statement', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-query-state', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-prepare-typed', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-execute-params2', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-execute-params', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-bind-portal', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-fetch-portal', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-close-portal', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-copy-out', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-copy-in', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-execute-batch', category: 'network', effects: new Set(['network', 'write']) },
+  { id: 'pg-open-scram', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-open-scram-random', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-open-scram-cancellable-random', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-cancel-authority-use', category: 'network', effects: new Set(['network']) },
+  { id: 'pg-close-scram', category: 'network', effects: new Set(['network']) },
 ];
 
 const IMPORT_BY_ID = new Map(IMPORT_SURFACE.map((i) => [i.id, i]));
@@ -170,11 +268,99 @@ export const DEFAULT_RUNTIME_LIMITS = {
   scramCredentialAllowlist: [],
   maxRandomBytes: 0,
   httpUrlAllowlist: [],
+  maxHttpFetches: 0,
+  maxLlmInfers: 0,
+  // Finite kagi-sign invocation quota. Default 0 = deny-by-default.
+  maxKagiSigns: 0,
+  // CSPRNG fill quota (bytes). Default 0 = deny-by-default until raised
+  // (matches kototama.contract `:max-random-bytes` 0).
+  maxRandomBytes: 0,
+  // Transport inject quota (handles). Default 0 = deny-by-default until
+  // HostCaps raises it (same pattern as maxHttpPosts / maxKagiSigns).
+  maxTransportConnections: 0,
   maxLogReadBytes: 1048576,
   maxLogWriteBytes: 65536,
+  // 16 Wasm pages (64 KiB/page) = 1 MiB -- same value and rationale as
+  // kototama.contract's `default-runtime-limits` :max-memory-pages
+  // (contract.cljc:226). kototama.tender (JVM/Chicory) enforces this
+  // PREVENTIVELY at instantiation time via Chicory's stable
+  // `Instance.Builder/withMemoryLimits` (tender.clj:557-572,646-651),
+  // capping how far a guest's OWN `memory.grow` can reach before the
+  // engine itself refuses the grow. There is no browser/Node equivalent:
+  // kotoba-wasm-emitted modules EXPORT their own memory (not host-import
+  // it -- see `instance.exports.memory` throughout this repo's *-element.js
+  // / *-worker-host.js), and the standard `WebAssembly.instantiate` JS API
+  // gives the host no hook to override a module's own declared memory
+  // ceiling. So this is enforced REACTIVELY here instead: every gated
+  // host-import call below re-checks current page count via
+  // `memoryPagesUsed`/`ensureMemoryWithinCap` and denies (-1) once over
+  // budget, same in-band convention `maxLogReadBytes`-adjacent limits use.
+  // This is real protection for the common case (a guest that grows memory
+  // then calls back into the host), but NOT for a guest that blows past
+  // the cap in one shot and never calls a host import again -- a genuine
+  // residual gap, not an oversight (see `memoryWithinCap`'s doc comment
+  // for the instantiation-time check that closes part of it).
+  maxMemoryPages: 16,
+  // null/undefined = unrestricted (the default -- preserves prior behavior
+  // for every existing caller that never set this). When a non-empty
+  // array, http-post is allowed only to URLs starting with one of these
+  // prefixes -- mirrors kototama.contract's :allowed-url-prefixes /
+  // url-allowed? 1:1 (same opt-in, fail-closed, per-call semantics; see
+  // urlAllowed below). NOT checked by validateImportSurface, same reason
+  // maxLogReadBytes-adjacent limits aren't: it doesn't gate whether the
+  // import is granted, only which URLs a granted call may reach.
+  allowedUrlPrefixes: null,
   allowSecretImports: false,
   allowWriteImports: false,
 };
+
+/**
+ * true iff url is permitted under limits.allowedUrlPrefixes.
+ * null/undefined/empty allowedUrlPrefixes means unrestricted (the default).
+ *
+ * Note: this is the only http-post hardening layer implemented here.
+ * kototama.tender (the JVM host) additionally runs an unconditional
+ * denylist against loopback/private/link-local/metadata destinations by
+ * resolving the hostname via java.net.InetAddress before connecting; a
+ * browser tab has no equivalent synchronous (or even straightforward
+ * async) DNS-resolution API to port that check to, so that layer is NOT
+ * mirrored here -- a real gap, not an oversight, left for a dedicated
+ * follow-up rather than a rushed partial port.
+ */
+export function urlAllowed(limits, url) {
+  const prefixes = limits && limits.allowedUrlPrefixes;
+  if (prefixes == null) return true;
+  if (prefixes.length === 0) return false;
+  return prefixes.some((p) => url.startsWith(p));
+}
+
+/**
+ * Current wasm linear-memory size, in 64 KiB pages. 0 before
+ * `memoryBox.memory` is set (pre-instantiation) -- callers past that point
+ * always have a real `WebAssembly.Memory` there. Uses division rather than
+ * a `>>> 16` shift so a memory at exactly the wasm32 4 GiB ceiling doesn't
+ * wrap through ToUint32.
+ */
+export function memoryPagesUsed(memoryBox) {
+  const buf = memoryBox && memoryBox.memory && memoryBox.memory.buffer;
+  return buf ? Math.floor(buf.byteLength / 65536) : 0;
+}
+
+/**
+ * true iff the guest's CURRENT linear-memory size is within
+ * `caps.limits.maxMemoryPages`. Callers that own the instantiate/call
+ * sequence (kotoba-wasm-worker-host.js) use this right after
+ * `memoryBox.memory = instance.exports.memory` and BEFORE calling the
+ * guest's export, to refuse a guest that already declares an
+ * over-budget memory section -- the one preventive check available
+ * without engine-level support (see `maxMemoryPages`'s doc comment for
+ * why growth DURING a call can only be checked reactively, per-call,
+ * not prevented).
+ */
+export function memoryWithinCap(memoryBox, caps) {
+  const c = hostCaps(caps);
+  return memoryPagesUsed(memoryBox) <= c.limits.maxMemoryPages;
+}
 
 export const DEFAULT_HOST_CAPS = {
   namespace: ACTOR_HOST_NAMESPACE,
@@ -207,17 +393,21 @@ export function validateImportSurface(requestedIds, caps) {
     errors.push({ error: 'limit/max-imports', limit: c.limits.maxImports, actual: known.length });
   }
   const httpPosts = known.filter((id) => id === 'http-post').length;
-  if (httpPosts > c.limits.maxHttpPosts) {
-    errors.push({ error: 'limit/max-http-posts', limit: c.limits.maxHttpPosts, actual: httpPosts });
+  const httpFetches = known.filter((id) => id === 'http-fetch').length;
+  if (httpFetches > c.limits.maxHttpFetches) {
+    errors.push({ error: 'limit/max-http-fetches', limit: c.limits.maxHttpFetches, actual: httpFetches });
+  }
+  const headerPosts = known.filter((id) => id === 'http-post-headers').length;
+  if (httpPosts + headerPosts > c.limits.maxHttpPosts) {
+    errors.push({
+      error: 'limit/max-http-posts',
+      limit: c.limits.maxHttpPosts,
+      actual: httpPosts + headerPosts,
+    });
   }
   const httpGets = known.filter((id) => id === 'http-get').length;
   if (httpGets > c.limits.maxHttpGets) {
     errors.push({ error: 'limit/max-http-gets', limit: c.limits.maxHttpGets, actual: httpGets });
-  }
-  const transportConnects = known.filter((id) => id === 'transport-connect').length;
-  if (transportConnects > c.limits.maxTransportConnections) {
-    errors.push({ error: 'limit/max-transport-connections',
-      limit: c.limits.maxTransportConnections, actual: transportConnects });
   }
   const llmInfers = known.filter((id) => id === 'llm-infer').length;
   if (llmInfers > c.limits.maxLlmInfers) {
@@ -238,6 +428,14 @@ export function validateImportSurface(requestedIds, caps) {
   const cancels = known.filter((id) => id === 'pg-cancel').length;
   if (cancels > c.limits.maxPgCancelRequests) {
     errors.push({ error: 'limit/max-pg-cancel-requests', limit: c.limits.maxPgCancelRequests, actual: cancels });
+  }
+  const transportConnects = known.filter((id) => id === 'transport-connect').length;
+  if (transportConnects > c.limits.maxTransportConnections) {
+    errors.push({
+      error: 'limit/max-transport-connections',
+      limit: c.limits.maxTransportConnections,
+      actual: transportConnects,
+    });
   }
   const secretImports = known.filter((id) => IMPORT_BY_ID.get(id).effects.has('secret'));
   if (!c.limits.allowSecretImports && secretImports.length) {
@@ -385,6 +583,232 @@ export function inMemoryStore() {
 // thrown error -- so a well-behaved guest can see it and back off, exactly
 // like `kototama.tender`'s distinction between a hard-thrown grant
 // violation and a soft quota signal.
+// ── Codec helpers: a byte-for-byte JS port of kototama.tender's (JVM)
+// flat-pairs wire format and CBOR/JSON encoders. The guest-facing wire
+// format is ONE `key<TAB>value` pair per LF-separated line, in the guest's
+// own order; a key MAY be a dot-separated path ("s.t", "resources.0") for
+// one interpretation of object/array nesting. This is deliberately NOT a
+// general codec: only flat string->string maps (with dotted-path nesting)
+// are representable. Every function below mirrors the same-named Clojure
+// helper in `kototama/src/kototama/tender.clj`; keep them byte-identical.
+
+const utf8Encoder = new TextEncoder();
+
+// `parse-flat-pairs`: one `key<TAB>value` pair per non-blank line; a
+// non-blank line with no TAB is fail-soft dropped. Order preserved.
+function parseFlatPairs(s) {
+  const pairs = [];
+  for (const line of s.split('\n')) {
+    if (line.trim() === '') continue;
+    const i = line.indexOf('\t');
+    if (i < 0) continue;
+    pairs.push([line.slice(0, i), line.slice(i + 1)]);
+  }
+  return pairs;
+}
+
+function numericKey(s) {
+  return /^\d+$/.test(s);
+}
+
+// `array-entries?`: entries (vector of [key,val]) has EXACTLY keys
+// "0".."(count-1)" in any order.
+function arrayEntries(entries) {
+  if (entries.length === 0) return false;
+  const ints = new Set();
+  for (const [k] of entries) {
+    if (!numericKey(k)) return false;
+    ints.add(Number.parseInt(k, 10));
+  }
+  if (ints.size !== entries.length) return false;
+  for (let i = 0; i < entries.length; i++) if (!ints.has(i)) return false;
+  return true;
+}
+
+// `object-entries-assoc`: replace SEG's value in place, or append.
+function objectEntriesAssoc(entries, seg, value) {
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i][0] === seg) {
+      entries[i] = [seg, value];
+      return entries;
+    }
+  }
+  entries.push([seg, value]);
+  return entries;
+}
+
+// `assoc-path!`: insert VALUE at PATH (array of segments) into ENTRIES,
+// creating intermediate object-shaped subtrees (arrays of pairs).
+function assocPath(entries, path, value) {
+  const [seg, ...more] = path;
+  if (more.length > 0) {
+    let existing;
+    for (const [k, v] of entries) if (k === seg) { existing = v; break; }
+    const child = Array.isArray(existing) ? existing : [];
+    return objectEntriesAssoc(entries, seg, assocPath(child, more, value));
+  }
+  return objectEntriesAssoc(entries, seg, value);
+}
+
+// `build-nested-tree`: fold pairs into an ordered tree of [key,val] pairs.
+function buildNestedTree(pairs) {
+  let entries = [];
+  for (const [k, v] of pairs) entries = assocPath(entries, k.split('.'), v);
+  return entries;
+}
+
+// `cbor-head`: definite-length CBOR head for MAJOR type and count N.
+function cborHead(out, major, n) {
+  if (n < 24) out.push((major << 5) + n);
+  else if (n < 256) { out.push((major << 5) + 24); out.push(n); }
+  else if (n < 65536) {
+    out.push((major << 5) + 25);
+    out.push((n >>> 8) & 0xff);
+    out.push(n & 0xff);
+  } else throw new Error('cbor len too big');
+}
+
+function cborString(out, s) {
+  const b = utf8Encoder.encode(s);
+  cborHead(out, 3, b.length);
+  for (const byte of b) out.push(byte);
+}
+
+// `tree-node->cbor`: string leaf; non-top array node -> major 4 in ascending
+// numeric-key order; else major 5 map in guest order.
+function treeNodeToCbor(out, node, topLevel) {
+  if (typeof node === 'string') { cborString(out, node); return; }
+  if (!topLevel && arrayEntries(node)) {
+    const items = [...node].sort((a, b) => Number.parseInt(a[0], 10) - Number.parseInt(b[0], 10)).map((e) => e[1]);
+    cborHead(out, 4, items.length);
+    for (const item of items) treeNodeToCbor(out, item, false);
+    return;
+  }
+  cborHead(out, 5, node.length);
+  for (const [k, v] of node) { cborString(out, k); treeNodeToCbor(out, v, false); }
+}
+
+function cborPairsBytes(pairs) {
+  const out = [];
+  treeNodeToCbor(out, buildNestedTree(pairs), true);
+  return new Uint8Array(out);
+}
+
+// `json-escape`: iterate UTF-16 code units (Java `char`), short escapes for
+// "/\/newline/return/tab, `\uXXXX` for other C0 controls, else pass through.
+function jsonEscape(s) {
+  let sb = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const code = s.charCodeAt(i);
+    if (ch === '"') sb += '\\"';
+    else if (ch === '\\') sb += '\\\\';
+    else if (ch === '\n') sb += '\\n';
+    else if (ch === '\r') sb += '\\r';
+    else if (ch === '\t') sb += '\\t';
+    else if (code < 0x20) sb += '\\u' + code.toString(16).padStart(4, '0');
+    else sb += ch;
+  }
+  return sb;
+}
+
+// `tree-node->json`: string leaf (escaped+quoted); non-top array node -> JSON
+// array in ascending numeric-key order; else JSON object in guest order.
+function treeNodeToJson(node, topLevel) {
+  if (typeof node === 'string') return '"' + jsonEscape(node) + '"';
+  if (!topLevel && arrayEntries(node)) {
+    const items = [...node].sort((a, b) => Number.parseInt(a[0], 10) - Number.parseInt(b[0], 10)).map((e) => e[1]);
+    return '[' + items.map((it) => treeNodeToJson(it, false)).join(',') + ']';
+  }
+  return '{' + node.map(([k, v]) => '"' + jsonEscape(k) + '":' + treeNodeToJson(v, false)).join(',') + '}';
+}
+
+function jsonPairsBytes(pairs) {
+  return utf8Encoder.encode(treeNodeToJson(buildNestedTree(pairs), true));
+}
+
+// `json-string-field-value`: bounded scan for `"FIELD":"..."`. Returns the
+// unescaped value string, or null when absent/non-string/malformed.
+function jsonStringFieldValue(jsonText, field) {
+  const needle = '"' + field + '"';
+  const keyIdx = jsonText.indexOf(needle);
+  if (keyIdx < 0) return null;
+  const colonIdx = jsonText.indexOf(':', keyIdx + needle.length);
+  if (colonIdx < 0) return null;
+  const n = jsonText.length;
+  let i = colonIdx + 1;
+  // skip ASCII whitespace; require an opening quote
+  while (i < n && /\s/.test(jsonText[i])) i++;
+  if (i >= n || jsonText[i] !== '"') return null;
+  i += 1;
+  let sb = '';
+  while (i < n) {
+    const ch = jsonText[i];
+    if (ch === '\\') {
+      if (i + 1 >= n) return null;
+      const esc = jsonText[i + 1];
+      const unescaped = esc === '"' ? '"' : esc === '\\' ? '\\' : esc === 'n' ? '\n'
+        : esc === 'r' ? '\r' : esc === 't' ? '\t' : esc;
+      sb += unescaped;
+      i += 2;
+    } else if (ch === '"') {
+      return sb;
+    } else {
+      sb += ch;
+      i += 1;
+    }
+  }
+  return null;
+}
+
+export function sessionAuthority(grants, useBudgets = {}) {
+  const active = new Set(grants || []);
+  const revoked = new Set();
+  const dropped = new Set();
+  const consumed = new Set();
+  const uses = new Map();
+  const remaining = new Map(
+    Object.entries(useBudgets).map(([id, value]) => {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`kototama actor-host: invalid use budget for ${id}`);
+      }
+      return [id, value];
+    })
+  );
+
+  const deactivate = (id, disposition) => {
+    active.delete(id);
+    disposition.add(id);
+  };
+
+  return Object.freeze({
+    consume(id) {
+      if (!active.has(id)) {
+        throw new Error(`kototama actor-host: ${id} denied (grant/inactive)`);
+      }
+      const left = remaining.get(id);
+      if (left !== undefined) {
+        if (left <= 0) {
+          deactivate(id, consumed);
+          throw new Error(`kototama actor-host: ${id} denied (grant/exhausted)`);
+        }
+        remaining.set(id, left - 1);
+        if (left === 1) deactivate(id, consumed);
+      }
+      uses.set(id, (uses.get(id) || 0) + 1);
+    },
+    revoke(id) { deactivate(id, revoked); },
+    drop(id) { deactivate(id, dropped); },
+    snapshot() {
+      return {
+        active: new Set(active), revoked: new Set(revoked),
+        dropped: new Set(dropped), consumed: new Set(consumed),
+        uses: new Map(uses), remaining: new Map(remaining),
+      };
+    },
+  });
+}
+
 export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   const c = hostCaps(caps);
   const validation = validateImportSurface(requestedIds, c);
@@ -395,8 +819,11 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   const store = opts.store || inMemoryStore();
   const state = {
     logReadBytes: 0, logWriteBytes: 0, randomBytes: 0, httpGets: 0, httpPosts: 0, kagiSigns: 0,
+    logReadBytes: 0, logWriteBytes: 0, randomBytes: 0, httpPosts: 0, httpFetches: 0,
+    llmInfers: 0, kagiSigns: 0,
   };
   const available = new Set(validation.requested);
+  const authority = opts.authority || sessionAuthority(c.grants);
 
   const readBytes = (ptr, len) => new Uint8Array(memoryBox.memory.buffer, ptr, len).slice();
   const writeBytes = (ptr, cap, bytes) => {
@@ -405,15 +832,46 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
     return bytes.length;
   };
   const ensureGranted = (id) => {
-    if (!c.grants.has(id)) {
-      throw new Error(`kototama actor-host: ${id} denied (grant/missing)`);
-    }
+    authority.consume(id);
   };
+  // Reactive counterpart to `maxMemoryPages` (see its doc comment on
+  // DEFAULT_RUNTIME_LIMITS for why this can't be preventive here). Every
+  // host-import below that has an in-band denial value checks this FIRST,
+  // same "cheapest check first" ordering `ensureGranted` already has
+  // relative to the rest of each function body. Skipped by
+  // `clock_monotonic` (no denial value in its return shape, and it writes
+  // no attacker-controlled bytes into guest memory, so gating it adds no
+  // real protection).
+  const overMemoryCap = () => memoryPagesUsed(memoryBox) > c.limits.maxMemoryPages;
 
   const fns = {};
 
   if (available.has('clock-monotonic')) {
-    fns.clock_monotonic = () => BigInt(Date.now());
+    fns.clock_monotonic = () => {
+      ensureGranted('clock-monotonic');
+      return BigInt(Date.now());
+    };
+  }
+
+  // `(out-ptr out-cap) -> bytes-written|-1`. Fills out-cap random bytes via
+  // Web Crypto CSPRNG (or opts.randomBytes for deterministic tests).
+  // `#{crypto, write}` — requires grant + allowWriteImports and is metered
+  // against maxRandomBytes (default 0 = deny). Caps single fill at 4096.
+  if (available.has('random-bytes')) {
+    fns.random_bytes = (outPtr, outCap) => {
+      ensureGranted('random-bytes');
+      if (outCap <= 0 || outCap > 4096 || state.randomBytes + outCap > c.limits.maxRandomBytes) return -1;
+      const bytes = new Uint8Array(outCap);
+      if (typeof opts.randomBytes === 'function') {
+        const supplied = opts.randomBytes(outCap);
+        if (!(supplied instanceof Uint8Array) || supplied.length !== outCap) return -1;
+        bytes.set(supplied);
+      } else {
+        globalThis.crypto.getRandomValues(bytes);
+      }
+      state.randomBytes += outCap;
+      return writeBytes(outPtr, outCap, bytes);
+    };
   }
 
   if (available.has('random-bytes')) {
@@ -434,6 +892,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('sha256-hex')) {
     fns.sha256_hex = (ptr, len, outPtr, outCap) => {
       ensureGranted('sha256-hex');
+      if (overMemoryCap()) return -1;
       const hex = sha256Hex(readBytes(ptr, len));
       return writeBytes(outPtr, outCap, new TextEncoder().encode(hex));
     };
@@ -447,6 +906,22 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
       try {
         const ref = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(refPtr, refLen));
         const signature = opts.kagiSigner.authorizedSign(opts.kagiDecisions, ref, readBytes(msgPtr, msgLen));
+  // `(ref-ptr ref-len msg-ptr msg-len out-ptr out-cap) -> written|-1`.
+  // Decision-aware trusted adapter only — links when opts.runtime === 'node'
+  // and opts.kagiSigner.authorizedSign + non-empty opts.kagiDecisions are set.
+  // Key never enters the guest; default maxKagiSigns 0 deny-by-default.
+  if (available.has('kagi-sign') && opts.runtime === 'node'
+      && typeof opts.kagiSigner?.authorizedSign === 'function'
+      && Array.isArray(opts.kagiDecisions) && opts.kagiDecisions.length > 0) {
+    fns.kagi_sign = (refPtr, refLen, msgPtr, msgLen, outPtr, outCap) => {
+      ensureGranted('kagi-sign');
+      if (state.kagiSigns >= c.limits.maxKagiSigns
+          || refLen <= 0 || refLen > 255
+          || msgLen < 0 || msgLen > 65536) return -1;
+      try {
+        const ref = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(refPtr, refLen));
+        const signature = opts.kagiSigner.authorizedSign(
+          opts.kagiDecisions, ref, readBytes(msgPtr, msgLen));
         if (!(signature instanceof Uint8Array)) return -1;
         const written = writeBytes(outPtr, outCap, signature);
         if (written >= 0) state.kagiSigns += 1;
@@ -565,12 +1040,431 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
     };
   }
 
+      } catch (_) {
+        return -1;
+      }
+    };
+  }
+
+  // ── Transport/TLS Node inject (T8.4) ─────────────────────────────────
+  // Browser: intentional absence (native boundary). Node: fail-closed
+  // defaults that never open sockets; opts.transportProvider may override
+  // individual methods. Handles are BigInt; 0n means deny/missing.
+  // Quota: maxTransportConnections (default 0 deny-by-default).
+  if (opts.runtime === 'node') {
+    const tp = opts.transportProvider || {};
+    const transportState = { nextHandle: 1n, open: new Set() };
+    const takeHandle = () => {
+      if (transportState.open.size >= c.limits.maxTransportConnections) return 0n;
+      const h = transportState.nextHandle;
+      transportState.nextHandle += 1n;
+      transportState.open.add(h);
+      return h;
+    };
+    if (available.has('transport-connect')) {
+      fns.transport_connect = (hostPtr, hostLen, port) => {
+        ensureGranted('transport-connect');
+        if (overMemoryCap()) return 0n;
+        if (hostLen <= 0 || hostLen > 255 || port < 0 || port > 65535) return 0n;
+        if (typeof tp.connect === 'function') {
+          try {
+            const host = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(hostPtr, hostLen));
+            const h = tp.connect(host, port | 0);
+            return typeof h === 'bigint' ? h : BigInt(h || 0);
+          } catch (_) {
+            return 0n;
+          }
+        }
+        // Fail-closed default: no real socket; empty allowlist semantics → 0.
+        return 0n;
+      };
+    }
+    if (available.has('tls-open')) {
+      fns.tls_open = (handle, namePtr, nameLen) => {
+        ensureGranted('tls-open');
+        if (overMemoryCap()) return 0n;
+        if (typeof tp.tlsOpen === 'function') {
+          try {
+            const name = nameLen > 0
+              ? new TextDecoder('utf-8', { fatal: true }).decode(readBytes(namePtr, nameLen))
+              : '';
+            const h = tp.tlsOpen(handle, name);
+            return typeof h === 'bigint' ? h : BigInt(h || 0);
+          } catch (_) {
+            return 0n;
+          }
+        }
+        // Invalid/unknown TCP handle → 0 (match JVM inject fail-closed).
+        return 0n;
+      };
+    }
+    if (available.has('tls-server-end-point')) {
+      fns.tls_server_end_point = (handle, outPtr, outCap) => {
+        ensureGranted('tls-server-end-point');
+        if (overMemoryCap()) return -1;
+        if (typeof tp.tlsServerEndPoint === 'function') {
+          try {
+            return tp.tlsServerEndPoint(handle, outPtr, outCap, { writeBytes, readBytes }) | 0;
+          } catch (_) {
+            return -1;
+          }
+        }
+        return -1;
+      };
+    }
+    if (available.has('transport-write')) {
+      fns.transport_write = (handle, ptr, len) => {
+        ensureGranted('transport-write');
+        if (overMemoryCap()) return -1;
+        if (typeof tp.write === 'function') {
+          try {
+            return tp.write(handle, readBytes(ptr, len)) | 0;
+          } catch (_) {
+            return -1;
+          }
+        }
+        return -1;
+      };
+    }
+    if (available.has('transport-read')) {
+      fns.transport_read = (handle, ptr, cap) => {
+        ensureGranted('transport-read');
+        if (overMemoryCap()) return -1;
+        if (typeof tp.read === 'function') {
+          try {
+            const bytes = tp.read(handle, cap);
+            if (!(bytes instanceof Uint8Array)) return -1;
+            return writeBytes(ptr, cap, bytes);
+          } catch (_) {
+            return -1;
+          }
+        }
+        return -1;
+      };
+    }
+    if (available.has('transport-close')) {
+      fns.transport_close = (handle) => {
+        ensureGranted('transport-close');
+        if (typeof tp.close === 'function') {
+          try {
+            return tp.close(handle) | 0;
+          } catch (_) {
+            return -1;
+          }
+        }
+        // Unknown handle → -1 (match JVM inject).
+        return -1;
+      };
+    }
+  }
+
+  // ── PostgreSQL pool / wire / cancel / SCRAM Node inject (T8.4) ─────
+  // Browser: intentional absence. Node: fail-closed defaults (no real PG);
+  // optional opts.pgPoolProvider / opts.pgWireProvider / opts.scramCredentials.
+  if (opts.runtime === 'node') {
+    const poolP = opts.pgPoolProvider || {};
+    const wireP = opts.pgWireProvider || {};
+    const denyI32 = () => -1;
+    const denyI64 = () => 0n;
+
+    const wirePool = (id, field, impl) => {
+      if (!available.has(id)) return;
+      fns[field] = (...args) => {
+        ensureGranted(id);
+        if (overMemoryCap()) return field.includes('open') && !field.includes('pool') ? 0n : -1;
+        try {
+          return impl(...args);
+        } catch (_) {
+          return field === 'pg_open' ? 0n : -1;
+        }
+      };
+    };
+
+    // Pool — i32 handles; fail-closed unknown → -1; open → -1 (no SCRAM/PG).
+    if (available.has('pg-pool-open')) {
+      fns.pg_pool_open = (hPtr, hLen, port, uPtr, uLen, dPtr, dLen, cPtr, cLen) => {
+        ensureGranted('pg-pool-open');
+        if (overMemoryCap()) return -1;
+        if (typeof poolP.open === 'function') {
+          try {
+            return poolP.open({
+              host: new TextDecoder().decode(readBytes(hPtr, hLen)),
+              port: port | 0,
+              user: new TextDecoder().decode(readBytes(uPtr, uLen)),
+              database: new TextDecoder().decode(readBytes(dPtr, dLen)),
+              credential: new TextDecoder().decode(readBytes(cPtr, cLen)),
+            }) | 0;
+          } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-acquire')) {
+      fns.pg_pool_acquire = (poolId) => {
+        ensureGranted('pg-pool-acquire');
+        if (typeof poolP.acquire === 'function') {
+          try { return poolP.acquire(poolId | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-query')) {
+      fns.pg_pool_query = (lease, qPtr, qLen, pPtr, pCap, oPtr, oCap) => {
+        ensureGranted('pg-pool-query');
+        if (overMemoryCap()) return -1;
+        if (typeof poolP.query === 'function') {
+          try {
+            return poolP.query(lease | 0, readBytes(qPtr, qLen), pPtr, pCap, oPtr, oCap) | 0;
+          } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-release')) {
+      fns.pg_pool_release = (lease) => {
+        ensureGranted('pg-pool-release');
+        if (typeof poolP.release === 'function') {
+          try { return poolP.release(lease | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-stats')) {
+      fns.pg_pool_stats = (poolId, outPtr, outCap) => {
+        ensureGranted('pg-pool-stats');
+        if (overMemoryCap()) return -1;
+        if (typeof poolP.stats === 'function') {
+          try { return poolP.stats(poolId | 0, outPtr, outCap) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-health')) {
+      fns.pg_pool_health = (poolId) => {
+        ensureGranted('pg-pool-health');
+        if (typeof poolP.health === 'function') {
+          try { return poolP.health(poolId | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-drain')) {
+      fns.pg_pool_drain = (poolId) => {
+        ensureGranted('pg-pool-drain');
+        if (typeof poolP.drain === 'function') {
+          try { return poolP.drain(poolId | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-pool-close')) {
+      fns.pg_pool_close = (poolId) => {
+        ensureGranted('pg-pool-close');
+        if (typeof poolP.close === 'function') {
+          try { return poolP.close(poolId | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+
+    // Wire — handle 0 / -1 fail-closed.
+    if (available.has('pg-open')) {
+      fns.pg_open = (hPtr, hLen, port, uPtr, uLen, dPtr, dLen) => {
+        ensureGranted('pg-open');
+        if (overMemoryCap()) return 0n;
+        if (typeof wireP.open === 'function') {
+          try {
+            const h = wireP.open({
+              host: new TextDecoder().decode(readBytes(hPtr, hLen)),
+              port: port | 0,
+              user: new TextDecoder().decode(readBytes(uPtr, uLen)),
+              database: new TextDecoder().decode(readBytes(dPtr, dLen)),
+            });
+            return typeof h === 'bigint' ? h : BigInt(h || 0);
+          } catch (_) { return 0n; }
+        }
+        return 0n;
+      };
+    }
+    if (available.has('pg-query')) {
+      fns.pg_query = (handle, qPtr, qLen, oPtr, oCap) => {
+        ensureGranted('pg-query');
+        if (overMemoryCap()) return -1;
+        if (typeof wireP.query === 'function') {
+          try { return wireP.query(handle, readBytes(qPtr, qLen), oPtr, oCap) | 0; }
+          catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+    if (available.has('pg-simple-query')) {
+      fns.pg_simple_query = (_a, _b, _c, _d, _e, _f, _g) => {
+        ensureGranted('pg-simple-query');
+        if (overMemoryCap()) return -1;
+        if (typeof wireP.simpleQuery === 'function') {
+          try { return wireP.simpleQuery(_a, _b, _c, _d, _e, _f, _g) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+
+    // Cancel
+    if (available.has('pg-cancel-register')) {
+      fns.pg_cancel_register = (handle, a, b) => {
+        ensureGranted('pg-cancel-register');
+        if (typeof opts.pgCancelRegister === 'function') {
+          try { return opts.pgCancelRegister(handle, a, b) | 0; } catch (_) { return 0; }
+        }
+        // non-TLS handle → 0
+        return 0;
+      };
+    }
+    if (available.has('pg-cancel')) {
+      fns.pg_cancel = (handle) => {
+        ensureGranted('pg-cancel');
+        if (typeof opts.pgCancel === 'function') {
+          try { return opts.pgCancel(handle | 0) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    }
+
+    // SCRAM-SHA-256 purpose-bound host crypto (Node).
+    // Password never enters guest; opts.scramCredentials is ref→password map
+    // (or getter), opts.scramCredentialAllowlist is a Set of allowed refs.
+    // Fail-closed -1 without credentials/allowlist (match JVM deny path).
+    if (available.has('scram-sha256')) {
+      fns.scram_sha256 = (
+        refPtr, refLen, saltPtr, saltLen, iterations,
+        authPtr, authLen, outPtr, outCap,
+      ) => {
+        ensureGranted('scram-sha256');
+        if (overMemoryCap()) return -1;
+        if (outCap < 64 || refLen <= 0 || refLen > 255
+            || saltLen <= 0 || saltLen > 1024
+            || iterations < 4096 || iterations > 1000000
+            || authLen <= 0 || authLen > 8192) return -1;
+        let ref;
+        try {
+          ref = new TextDecoder('utf-8', { fatal: true }).decode(readBytes(refPtr, refLen));
+        } catch (_) { return -1; }
+        const allow = opts.scramCredentialAllowlist;
+        if (!(allow instanceof Set) || !allow.has(ref)) return -1;
+        let creds = opts.scramCredentials;
+        if (typeof creds === 'function') {
+          try { creds = creds(); } catch (_) { return -1; }
+        }
+        const secret = creds && creds[ref];
+        if (secret == null || secret === '') return -1;
+        // Node crypto SCRAM-SHA-256 client-proof || server-signature (64 bytes)
+        try {
+          // dynamic import not available sync; use globalThis.crypto.subtle is async.
+          // Prefer node:crypto when available via createRequire pattern is heavy;
+          // use opts.scramProve inject for success path, else compute via WebCrypto sync? No.
+          // Node 19+ has global crypto with subtle async only.
+          // Use createHmac/pbkdf2Sync from node:crypto via process.getBuiltinModule if present.
+          const nodeCrypto = (typeof process !== 'undefined' && process.getBuiltinModule)
+            ? process.getBuiltinModule('crypto')
+            : null;
+          if (!nodeCrypto || typeof nodeCrypto.pbkdf2Sync !== 'function') {
+            if (typeof opts.scramProve === 'function') {
+              const proof = opts.scramProve({
+                ref,
+                password: String(secret),
+                salt: readBytes(saltPtr, saltLen),
+                iterations: iterations | 0,
+                authMessage: readBytes(authPtr, authLen),
+              });
+              if (!(proof instanceof Uint8Array) || proof.length !== 64) return -1;
+              return writeBytes(outPtr, outCap, proof);
+            }
+            return -1;
+          }
+          const password = String(secret);
+          const salt = Buffer.from(readBytes(saltPtr, saltLen));
+          const authMessage = Buffer.from(readBytes(authPtr, authLen));
+          const salted = nodeCrypto.pbkdf2Sync(password, salt, iterations | 0, 32, 'sha256');
+          const hmac = (key, data) => nodeCrypto.createHmac('sha256', key).update(data).digest();
+          const clientKey = hmac(salted, 'Client Key');
+          const storedKey = nodeCrypto.createHash('sha256').update(clientKey).digest();
+          const clientSignature = hmac(storedKey, authMessage);
+          const clientProof = Buffer.alloc(32);
+          for (let i = 0; i < 32; i++) clientProof[i] = clientKey[i] ^ clientSignature[i];
+          const serverKey = hmac(salted, 'Server Key');
+          const serverSignature = hmac(serverKey, authMessage);
+          const out = Buffer.concat([clientProof, serverSignature]);
+          return writeBytes(outPtr, outCap, new Uint8Array(out));
+        } catch (_) {
+          return -1;
+        }
+      };
+    }
+  }
+
+  // ── Deeper wire + SCRAM session open (T8.4 residual) ────────────────
+  // Fail-closed i32→-1 / i64 open→0n. Optional opts.pgWireProvider overrides.
+  if (opts.runtime === 'node') {
+    const wireDeep = opts.pgWireProvider || {};
+    const denyI32 = () => -1;
+    const denyI64 = () => 0n;
+    const wireDeepI32 = (id, field, override) => {
+      if (!available.has(id)) return;
+      fns[field] = (...args) => {
+        ensureGranted(id);
+        if (overMemoryCap()) return -1;
+        if (typeof wireDeep[override] === 'function') {
+          try { return wireDeep[override](...args) | 0; } catch (_) { return -1; }
+        }
+        return -1;
+      };
+    };
+    const wireDeepI64 = (id, field, override) => {
+      if (!available.has(id)) return;
+      fns[field] = (...args) => {
+        ensureGranted(id);
+        if (overMemoryCap()) return 0n;
+        if (typeof wireDeep[override] === 'function') {
+          try {
+            const h = wireDeep[override](...args);
+            return typeof h === 'bigint' ? h : BigInt(h || 0);
+          } catch (_) { return 0n; }
+        }
+        return 0n;
+      };
+    };
+    // prepare / execute / portal / copy / batch (i32 fail-closed)
+    wireDeepI32('pg-prepare', 'pg_prepare', 'prepare');
+    wireDeepI32('pg-session-reset', 'pg_session_reset', 'sessionReset');
+    wireDeepI32('pg-close-statement', 'pg_close_statement', 'closeStatement');
+    wireDeepI32('pg-query-state', 'pg_query_state', 'queryState');
+    wireDeepI32('pg-prepare-typed', 'pg_prepare_typed', 'prepareTyped');
+    wireDeepI32('pg-execute-params2', 'pg_execute_params2', 'executeParams2');
+    wireDeepI32('pg-execute-params', 'pg_execute_params', 'executeParams');
+    wireDeepI32('pg-bind-portal', 'pg_bind_portal', 'bindPortal');
+    wireDeepI32('pg-fetch-portal', 'pg_fetch_portal', 'fetchPortal');
+    wireDeepI32('pg-close-portal', 'pg_close_portal', 'closePortal');
+    wireDeepI32('pg-copy-out', 'pg_copy_out', 'copyOut');
+    wireDeepI32('pg-copy-in', 'pg_copy_in', 'copyIn');
+    wireDeepI32('pg-execute-batch', 'pg_execute_batch', 'executeBatch');
+    wireDeepI32('pg-cancel-authority-use', 'pg_cancel_authority_use', 'cancelAuthorityUse');
+    wireDeepI32('pg-close-scram', 'pg_close_scram', 'closeScram');
+    // SCRAM session open → handle 0
+    wireDeepI64('pg-open-scram', 'pg_open_scram', 'openScram');
+    wireDeepI64('pg-open-scram-random', 'pg_open_scram_random', 'openScramRandom');
+    wireDeepI64('pg-open-scram-cancellable-random', 'pg_open_scram_cancellable_random', 'openScramCancellableRandom');
+  }
+
+
+
+
+
   // `(out-ptr out-cap) -> bytes-written|-1`. Writes a fresh 32-byte Ed25519
   // seed followed by its 32-byte derived public key (64 bytes total) --
   // same wire shape kototama.tender's (JVM) `gen-keypair-host-fn` uses.
   if (available.has('gen-keypair')) {
     fns.gen_keypair = (outPtr, outCap) => {
       ensureGranted('gen-keypair');
+      if (overMemoryCap()) return -1;
       const seed = ed25519.utils.randomPrivateKey();
       const pub = ed25519.getPublicKey(seed);
       const out = new Uint8Array(64);
@@ -585,6 +1479,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('sign')) {
     fns.sign = (seedPtr, msgPtr, msgLen, outPtr, outCap) => {
       ensureGranted('sign');
+      if (overMemoryCap()) return -1;
       const seed = readBytes(seedPtr, 32);
       const msg = readBytes(msgPtr, msgLen);
       const sig = ed25519.sign(msg, seed);
@@ -596,6 +1491,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('verify')) {
     fns.verify = (pubPtr, pubLen, msgPtr, msgLen, sigPtr, sigLen) => {
       ensureGranted('verify');
+      if (overMemoryCap()) return 0; // this fn's own 1|0 denial shape, not -1
       const pub = readBytes(pubPtr, pubLen);
       const msg = readBytes(msgPtr, msgLen);
       const sig = readBytes(sigPtr, sigLen);
@@ -606,6 +1502,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('log-read')) {
     fns.log_read = (outPtr, outCap) => {
       ensureGranted('log-read');
+      if (overMemoryCap()) return -1;
       const bytes = store.read();
       if (state.logReadBytes + bytes.length > c.limits.maxLogReadBytes) return -1;
       state.logReadBytes += bytes.length;
@@ -616,6 +1513,7 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
   if (available.has('log-write')) {
     fns.log_write = (ptr, len) => {
       ensureGranted('log-write');
+      if (overMemoryCap()) return -1;
       const bytes = readBytes(ptr, len);
       if (state.logWriteBytes + bytes.length > c.limits.maxLogWriteBytes) return -1;
       state.logWriteBytes += bytes.length;
@@ -624,26 +1522,228 @@ export function actorHostImports(requestedIds, caps, memoryBox, opts = {}) {
     };
   }
 
-  // `(prompt-ptr prompt-len out-ptr out-cap) -> bytes-written|-1`. Only
-  // wired when a caller supplies `opts.llmInfer` (a synchronous
-  // `(promptString) => string|null` function) -- e.g. this repo's own
-  // Node-hosted verify scripts backing it with a blocking child_process
-  // call to `curl`. Never call `opts.llmInfer` from actual browser code: a
-  // synchronous XHR-style blocking call is deprecated/discouraged
-  // platform-wide there, unlike a Node `child_process` call, which has no
-  // such constraint. `text === null` (no API key configured on the host,
-  // the call failed, or an empty/malformed reply) fails closed as -1, same
-  // as `kototama.tender`'s `llm-infer-host-fn` never distinguishing "no
-  // credential" from "call failed" in-band.
-  if (available.has('llm-infer') && typeof opts.llmInfer === 'function') {
+  // `(prompt-ptr prompt-len out-ptr out-cap) -> bytes-written|-1`. Wired
+  // whenever a synchronous backend exists -- either:
+  //   - inject: `opts.llmInfer` (a synchronous `(promptString) =>
+  //     string|null` function), e.g. this repo's own Node-hosted verify
+  //     scripts backing it with a blocking child_process call. Never call
+  //     `opts.llmInfer` from actual browser code: a synchronous XHR-style
+  //     blocking call is deprecated/discouraged platform-wide there, unlike
+  //     a Node `child_process` call, which has no such constraint.
+  //   - SAB/COOP bridge: `opts.llmInferBridge` (the SAME bridge shape
+  //     `http-post` uses, typically the identical bridge instance) plus
+  //     `opts.llmInferUrl`, a developer-controlled endpoint `llm_infer`
+  //     POSTs the raw prompt bytes to and reads the raw completion text
+  //     back from. This is deliberately NOT a built-in call to any real LLM
+  //     provider (unlike `kototama.tender`'s JVM-only, server-side
+  //     `anthropic-infer`) -- a browser tab can never hold a real provider
+  //     API key without shipping it to every visitor, so the provider call
+  //     itself must live behind `llmInferUrl`, on a host the caller
+  //     controls.
+  // Runtime-metered against maxLlmInfers (in-band -1 when exhausted), same
+  // convention http_post's maxHttpPosts already uses. `text === null` (no
+  // backend configured, the call failed, or an empty/malformed reply) fails
+  // closed as -1, same as `kototama.tender`'s `llm-infer-host-fn` never
+  // distinguishing "no credential" from "call failed" in-band.
+  const llmInferSync =
+    typeof opts.llmInfer === 'function'
+      ? opts.llmInfer
+      : (opts.llmInferBridge &&
+          typeof opts.llmInferBridge.postSync === 'function' &&
+          typeof opts.llmInferUrl === 'string'
+          ? (promptString) => {
+              const resp = opts.llmInferBridge.postSync(
+                opts.llmInferUrl,
+                new TextEncoder().encode(promptString),
+              );
+              return resp == null ? null : new TextDecoder().decode(resp);
+            }
+          : null);
+
+  if (available.has('llm-infer') && llmInferSync) {
     fns.llm_infer = (promptPtr, promptLen, outPtr, outCap) => {
       ensureGranted('llm-infer');
+      if (overMemoryCap()) return -1;
+      if (state.llmInfers >= c.limits.maxLlmInfers) return -1;
       const prompt = new TextDecoder().decode(readBytes(promptPtr, promptLen));
-      const text = opts.llmInfer(prompt);
+      let text;
+      try {
+        text = llmInferSync(prompt);
+      } catch (_) {
+        return -1;
+      }
       if (text == null) return -1;
-      return writeBytes(outPtr, outCap, new TextEncoder().encode(text));
+      const n = writeBytes(outPtr, outCap, new TextEncoder().encode(text));
+      if (n >= 0) state.llmInfers += 1;
+      return n;
+    };
+  }
+
+  // `(url-ptr url-len body-ptr body-len out-ptr out-cap) -> bytes-written|-1`.
+  // Wired only when a synchronous backend exists (inject or SAB bridge).
+  // Runtime-metered against maxHttpPosts (in-band -1 when exhausted), and
+  // against limits.allowedUrlPrefixes (opt-in, unrestricted by default;
+  // see urlAllowed above) -- same in-band -1 fail-closed convention.
+  const httpPostSync =
+    typeof opts.httpPost === 'function'
+      ? opts.httpPost
+      : (opts.httpPostBridge && typeof opts.httpPostBridge.postSync === 'function'
+          ? (url, body) => opts.httpPostBridge.postSync(url, body)
+          : null);
+
+  if (available.has('http-post') && httpPostSync) {
+    fns.http_post = (urlPtr, urlLen, bodyPtr, bodyLen, outPtr, outCap) => {
+      ensureGranted('http-post');
+      if (overMemoryCap()) return -1;
+      if (state.httpPosts >= c.limits.maxHttpPosts) return -1;
+      const url = new TextDecoder().decode(readBytes(urlPtr, urlLen));
+      if (!urlAllowed(c.limits, url)) return -1;
+      const body = readBytes(bodyPtr, bodyLen);
+      let resp;
+      try {
+        resp = httpPostSync(url, body);
+      } catch (_) {
+        return -1;
+      }
+      if (resp == null) return -1;
+      const bytes = resp instanceof Uint8Array ? resp : new TextEncoder().encode(String(resp));
+      const n = writeBytes(outPtr, outCap, bytes);
+      if (n >= 0) state.httpPosts += 1;
+      return n;
+    };
+  }
+
+  const httpFetchSync =
+    typeof opts.httpFetch === 'function'
+      ? opts.httpFetch
+      : (opts.httpPostBridge && typeof opts.httpPostBridge.getSync === 'function'
+          ? (url) => opts.httpPostBridge.getSync(url)
+          : null);
+
+  // `(url-ptr url-len out-ptr out-cap) -> bytes-written|-1`. GET-only,
+  // independently granted and metered, while sharing the same destination
+  // allowlist and synchronous inject/SAB transport as http_post.
+  if (available.has('http-fetch') && httpFetchSync) {
+    fns.http_fetch = (urlPtr, urlLen, outPtr, outCap) => {
+      ensureGranted('http-fetch');
+      if (overMemoryCap()) return -1;
+      if (state.httpFetches >= c.limits.maxHttpFetches) return -1;
+      const url = new TextDecoder().decode(readBytes(urlPtr, urlLen));
+      if (!urlAllowed(c.limits, url)) return -1;
+      let resp;
+      try {
+        resp = httpFetchSync(url);
+      } catch (_) {
+        return -1;
+      }
+      if (resp == null) return -1;
+      const bytes = resp instanceof Uint8Array ? resp : utf8Encoder.encode(String(resp));
+      const n = writeBytes(outPtr, outCap, bytes);
+      if (n >= 0) state.httpFetches += 1;
+      return n;
+    };
+  }
+
+  const httpPostHeadersSync =
+    typeof opts.httpPostHeaders === 'function'
+      ? opts.httpPostHeaders
+      : (opts.httpPostBridge && typeof opts.httpPostBridge.postHeadersSync === 'function'
+          ? (url, body, headers) => opts.httpPostBridge.postHeadersSync(url, body, headers)
+          : null);
+
+  // Headers use the same key<TAB>value, LF-separated wire format as the
+  // codec imports and the JVM host. It shares maxHttpPosts with http_post.
+  if (available.has('http-post-headers') && httpPostHeadersSync) {
+    fns.http_post_headers =
+      (urlPtr, urlLen, bodyPtr, bodyLen, headersPtr, headersLen, outPtr, outCap) => {
+        ensureGranted('http-post-headers');
+        if (overMemoryCap()) return -1;
+        if (state.httpPosts >= c.limits.maxHttpPosts) return -1;
+        const url = new TextDecoder().decode(readBytes(urlPtr, urlLen));
+        if (!urlAllowed(c.limits, url)) return -1;
+        const body = readBytes(bodyPtr, bodyLen);
+        const headerText = new TextDecoder().decode(readBytes(headersPtr, headersLen));
+        const headers = parseFlatPairs(headerText);
+        let resp;
+        try {
+          resp = httpPostHeadersSync(url, body, headers);
+        } catch (_) {
+          return -1;
+        }
+        if (resp == null) return -1;
+        const bytes = resp instanceof Uint8Array ? resp : utf8Encoder.encode(String(resp));
+        const n = writeBytes(outPtr, outCap, bytes);
+        if (n >= 0) state.httpPosts += 1;
+        return n;
+      };
+  }
+
+  // Codec imports -- pure computation, byte-for-byte ports of
+  // kototama.tender's JVM host fns. Not gated by any RuntimeLimits count
+  // (same as sha256_hex). `(pairs-ptr pairs-len out-ptr out-cap) ->
+  // bytes-written|-1`.
+  if (available.has('cbor-encode')) {
+    fns.cbor_encode = (ptr, len, outPtr, outCap) => {
+      ensureGranted('cbor-encode');
+      if (overMemoryCap()) return -1;
+      const pairs = parseFlatPairs(new TextDecoder().decode(readBytes(ptr, len)));
+      return writeBytes(outPtr, outCap, cborPairsBytes(pairs));
+    };
+  }
+
+  if (available.has('json-encode')) {
+    fns.json_encode = (ptr, len, outPtr, outCap) => {
+      ensureGranted('json-encode');
+      if (overMemoryCap()) return -1;
+      const pairs = parseFlatPairs(new TextDecoder().decode(readBytes(ptr, len)));
+      return writeBytes(outPtr, outCap, jsonPairsBytes(pairs));
+    };
+  }
+
+  // `(json-ptr json-len field-ptr field-len out-ptr out-cap) ->
+  // bytes-written|-1`. -1 when FIELD is absent/non-string/malformed.
+  if (available.has('json-extract-field')) {
+    fns.json_extract_field = (jsonPtr, jsonLen, fieldPtr, fieldLen, outPtr, outCap) => {
+      ensureGranted('json-extract-field');
+      if (overMemoryCap()) return -1;
+      const jsonText = new TextDecoder().decode(readBytes(jsonPtr, jsonLen));
+      const field = new TextDecoder().decode(readBytes(fieldPtr, fieldLen));
+      const value = jsonStringFieldValue(jsonText, field);
+      if (value === null) return -1;
+      return writeBytes(outPtr, outCap, utf8Encoder.encode(value));
     };
   }
 
   return fns;
+}
+
+/**
+ * Detect which http-post backends are available in this environment.
+ * Pure observation — does not perform network I/O.
+ */
+export function httpPostCapabilities() {
+  const crossOriginIsolated =
+    typeof globalThis.crossOriginIsolated === 'boolean'
+      ? globalThis.crossOriginIsolated
+      : false;
+  const hasSab =
+    typeof SharedArrayBuffer !== 'undefined' &&
+    typeof Atomics !== 'undefined' &&
+    typeof Atomics.wait === 'function';
+  // JSPI: WebAssembly.promising / Suspending — Chrome experimental
+  const hasJspi =
+    typeof WebAssembly !== 'undefined' &&
+    typeof WebAssembly.promising === 'function';
+  return {
+    inject: true, // always available as programming interface
+    sabCoop: Boolean(crossOriginIsolated && hasSab),
+    jspi: hasJspi,
+    crossOriginIsolated,
+    hasSharedArrayBuffer: hasSab,
+    recommended: hasSab && crossOriginIsolated
+      ? 'sab-coop'
+      : hasJspi
+        ? 'jspi-experimental'
+        : 'inject',
+  };
 }

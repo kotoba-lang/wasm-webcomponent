@@ -1,17 +1,27 @@
 # kotoba-lang/wasm-webcomponent
 
-A small, dependency-free library for hosting a `kotoba wasm emit` binary
-([kotoba-lang/kotoba](https://github.com/kotoba-lang/kotoba)) as a browser
-WebComponent, running it via the browser's own native `WebAssembly` engine
-— already-AOT-compiled machine code, no interpreter, no JVM, no
-`com.dylibso.chicory`, no wasmtime.
+Kototama's **browser host** — a small, dependency-free library for hosting a
+`kotoba wasm emit` binary as a browser WebComponent, running it via the
+browser's own native `WebAssembly` engine. Already-AOT-compiled machine code,
+no interpreter, no JVM, no `com.dylibso.chicory`, no wasmtime.
 
-Extracted from [kotoba-lang/kototama](https://github.com/kotoba-lang/kototama)'s
-original `web/` PoC (see
-[ADR-2607061630](https://github.com/com-junkawasaki/root/blob/main/90-docs/adr/2607061630-kototama-browser-wasm-aot-webcomponent.md)
-and its follow-up) so any repo can adopt the same pattern instead of
-hand-rolling it. kototama's own `web/` now imports from here rather than
-duplicating the code.
+The product is [`kototama`](https://github.com/kotoba-lang/kototama) (言霊).
+This library stays extracted so any repo can adopt the same pattern instead
+of depending on kototama core (ADR-2607061630 / ADR-2608139980).
+kototama's own `web/` imports from here rather than duplicating the code.
+
+Guest binaries are produced by [`amu`](https://github.com/kotoba-lang/amu)
+(編む), not by this host.
+
+## CDCI status
+
+The former GitHub Actions workflow used Node 22, npm and NBB/KBB-based
+harnesses. It has been retired under the Amu selfhost / Kotoba-only CDCI
+direction. No replacement success status or native qualification is claimed.
+Existing host fixtures and the verification commands described below remain
+porting inventory; their historical results do not qualify native CDCI.
+The replacement controller and gates must run through canonical Kotoba and
+Amu selfhost, with loaderless native artifacts and recorded provenance.
 
 ## Usage
 
@@ -61,9 +71,14 @@ KotobaWasmElement.define('my-cap-demo', {
 });
 ```
 
-Module using the `actor:host` ABI (`src/actor-host.js`'s port of
-`kototama.contract`'s HostCaps/RuntimeLimits, `kototama-lang/kototama`'s
-JVM tender's browser-side counterpart):
+Module using the `actor:host` ABI (`src/actor-host.js`'s peer,
+browser/Node-native implementation of `kototama.contract`'s HostCaps/
+RuntimeLimits — `tender` is a host-language-independent role, not a JVM
+concept; this is an independent, non-JVM implementation of that role
+alongside `kotoba-lang/kototama`'s JVM/Chicory `kototama.tender`, not a
+port derived from it. Its authority table and host functions cover all
+14 contract imports; network imports require an inject or SAB bridge —
+see "Scope" below):
 
 ```js
 import { KotobaWasmElement } from './src/kotoba-wasm-element.js';
@@ -74,6 +89,27 @@ KotobaWasmElement.define('my-actor-host-demo', {
     const store = inMemoryStore();
     const caps = hostCaps({ grants: ['clock-monotonic', 'sha256-hex'] });
     return { kotoba: actorHostImports(['clock-monotonic', 'sha256-hex'], caps, memoryBox, { store }) };
+  },
+});
+```
+
+Amu `compile --target wasm` guests import `kotoba:cap`/`call`, not
+`actor:host`. That host is ClojureScript (`src-cljs/kotoba/kotoba_cap.cljk`
+→ `src/kotoba-cap.js`), not more hand-written JS. Always link that module
+(JVM tender does the same):
+
+```js
+import { KotobaWasmElement } from './src/kotoba-wasm-element.js';
+import { actorHostImports, hostCaps } from './src/actor-host.js';
+import { kotobaCapImports } from './src/kotoba-cap.js';
+
+KotobaWasmElement.define('my-amu-clock', {
+  createImports(memoryBox) {
+    const caps = hostCaps({ grants: ['clock-monotonic'] });
+    return {
+      kotoba: actorHostImports(['clock-monotonic'], caps, memoryBox),
+      'kotoba:cap': kotobaCapImports(caps),
+    };
   },
 });
 ```
@@ -91,16 +127,20 @@ KotobaWasmElement.define('my-actor-host-demo', {
   Only pull this in if your module actually calls `kgraph-assert!`/
   `kgraph-query`/etc.
 - `examples/hello/` — zero-import module (`kotoba wasm emit src/demo.kotoba`,
-  73 bytes, `main()` returns 42).
+  102 bytes, `main()` returns 42).
 - `examples/kgraph/` — a module using the `kgraph-*` host imports
   (`kotoba wasm emit src/demo_kgraph.kotoba --policy src/demo_kgraph_policy.edn`,
-  219 bytes).
+  248 bytes).
 - `examples/gcd/` — a brand-new `.kotoba` program (`gcd.kotoba`, included)
   demonstrating real runtime recursion (the Euclidean algorithm), not a
   hardcoded constant or a compile-time-folded computation. Compiled with
-  `kotoba wasm emit gcd.kotoba --package-lock <empty-deps-lock>` (96 bytes;
+  `kotoba wasm emit gcd.kotoba --package-lock <empty-deps-lock>` (145 bytes;
   see kotoba-lang/kotoba#284 for why an empty-deps lock is needed for a
-  zero-dependency build).
+  zero-dependency build). Byte counts above (and every other example's,
+  as of kotoba-lang/kotoba's embedded-fuel change) include the
+  module-private fuel global + per-function charge prologue every
+  `kotoba wasm emit` output now carries — see `wasm-binary`'s doc comment
+  in that repo's `runtime.clj` for why.
 - `src/has-capability.js` — optional: a browser-side port of
   `kotoba-lang/kotoba`'s `has_capability` host import
   (`kotoba.wasm-exec/has-capability-fn`), for modules with a runtime
@@ -114,14 +154,14 @@ KotobaWasmElement.define('my-actor-host-demo', {
   (`main()` → 7) and once denying everything (`main()` → 0) — proves the
   check is real per-instantiation policy, not a stub that always answers
   one way.
-- `src-cljs/kotoba/kami_ecs.cljs` / `src/kami-ecs.js` — the browser/Node
+- `src-cljs/kotoba/kami_ecs.cljk` / `src/kami-ecs.js` — the browser/Node
   host for `kotoba-lang/kotoba`'s `kotoba.kami-host` (the deterministic
   game-engine ECS behind the `kami-*` host imports, kotoba-core-contracts
   `"kami/engine"` id 233, single `(module "kotoba")` ABI — NOT
   `kami-engine-host.js`'s 4-namespace `kami:engine/*` shape). **Authored
   in ClojureScript** (like `kami-engine-host.js`, unlike this repo's
   hand-JS modules — it replaced an earlier hand-JS port): the portable
-  `.cljc` ECS itself is `src-cljs/vendor/kotoba/kami_host.cljc`, VENDORED
+  `.cljc` ECS itself is `src-cljs/vendor/kotoba/kami_host.cljk`, VENDORED
   file-for-file from `kotoba-lang/kotoba` (the `src/vendor` ed25519
   convention; provenance sha in its header) so ONE source serves kotoba's
   JVM compat suite, its nbb parity script, and this ESM — no drift.
@@ -140,23 +180,40 @@ KotobaWasmElement.define('my-actor-host-demo', {
   parity proof: the same 300-tick run asserts the exact entity counts
   (`12` at tick 240, `8` after the tick-270 nova burst, `10` at 300,
   seed 7) kotoba's own JVM/Chicory test pins.
-- `src/actor-host.js` — a browser-side port of `kotoba-lang/kototama`'s
-  `kototama.contract` (`actor:host` ABI: `HostCaps`/`RuntimeLimits`/
-  `validateImportSurface`, same fail-closed pre-flight + per-call grant
-  checks as `kototama.tender`, the JVM/Chicory counterpart). Implements
-  the pure synchronous imports plus an explicitly injected `http-get`.
-  Browser HTTP uses a worker/SharedArrayBuffer bridge and therefore requires
-  COOP/COEP; it is default-denied, request-count bounded, manually redirected,
-  and constrained by an HTTPS host/port/path allowlist. Raw socket/TLS,
-  database, SCRAM, cancellation, and bare `http-post` imports remain unlinked.
-  Includes a hand-rolled, zero-dependency,
-  test-vector-verified synchronous SHA-256 (Web Crypto's
-  `crypto.subtle.digest` is async, unusable inside a synchronous host
-  import) and vendors the real `@noble/curves` ed25519 for `gen-keypair`/
-  `sign`/`verify` (see `src/vendor/README.md` — Ed25519 signing is pure
-  arithmetic, not I/O, so it doesn't need `SubtleCrypto`'s async API, but
-  it's real elliptic-curve math not worth hand-rolling from scratch the
-  way SHA-256 is).
+- `src-cljs/kotoba/kotoba_cap.cljk` / `src/kotoba-cap.js` — the browser/Node
+  host for amu wasm32-kotoba-v1 `kotoba:cap`/`call` (typed-cap-call i64).
+  **Authored in ClojureScript** and compiled once via `shadow-cljs.edn`'s
+  `:kotoba-cap` build (`:target :esm`) to `src/kotoba-cap.js` — same
+  pattern as `kami-engine-host` / `gpu-clear-host`. This is the host, not
+  a `.kotoba` guest; new Node proof is nbb (`npm run test:kotoba-cap`),
+  not `.mjs`. Capability 7 is clock/now under the `:clock-monotonic`
+  grant; any other id fail-closes with the same
+  `kototama.tender: host import denied` message as the JVM tender.
+  `actor-host.js` does not re-export this module, so the cljs runtime is
+  not on the actor:host path. Regenerate with `npm run release:kotoba-cap`
+  (the compiled output is checked in). Proof against **amu-woven** bytes
+  (not only hand-written WAT) is `examples/kotoba-cap/amu-compiled-clock-now.wasm`
+  + `npm run test:kotoba-cap`.
+- `examples/kotoba-cap/` — amu `compile-source :wasm32-kotoba-v1` guest
+  (`clock/now` → `kotoba:cap`/`call` id 7) hosted by `kotoba-cap.js`.
+  Same fixture kototama binds on the JVM (`amu-compiled-clock-now.wasm`).
+- `src/actor-host.js` — a peer, browser/Node-native implementation of the
+  `tender` role `kototama.contract` defines (the same role
+  `kotoba-lang/kototama`'s JVM/Chicory `kototama.tender` implements —
+  `tender` names a host-language-independent role, not a JVM-specific
+  concept; see ADR-2607183010). Unconditionally sync: clock / sha256 /
+  gen-keypair / sign / verify / log-* / codecs. Conditional:
+  **`llm-infer`**, **`http-fetch`**, **`http-post-headers`**, and
+  **`http-post`** (inject, or the shared `opts.httpPostBridge` SAB+COOP
+  transport from `http-post-bridge.js`). JSPI is
+  detected (`httpPostCapabilities`) but not the default wire. All 14 JVM
+  contract imports now share the same browser session authority,
+  one-shot/revoke/drop lifecycle, memory gate and quotas. Network effects
+  deliberately have no ambient synchronous default — see "Scope" below.
+  See `test/verify-http-post.mjs`
+  + `examples/http-post-echo.wasm`.
+
+- `src/component-linker.js` / `src/http-sab-bridge.js` / `src/node-*-provider.js` — the bounded component provider runtime: `createComponentLinks` binds kotoba components to exact-endpoint providers; the SAB HTTP bridge (`attachSabHttpGetBridge`/`attachSabHttpPostBridge`) gives browser components synchronous fetch over SharedArrayBuffer (COOP/COEP required, default-denied, request-count bounded, manual redirects, HTTPS host/port/path allowlist); the Node providers (`createNodeCredentialProvider`, `createNodePostgresqlPoolProvider`, `createNodeTransportBroker`) are fail-closed by default with lease-based connection handles and explicit per-method overrides. Proof: `test/verify-node-*.mjs`, `test/verify-actor-host.mjs`, `test/browser/verify-http-get-sab.mjs`.
 - `src/vendor/` — the actual, unmodified `@noble/curves`/`@noble/hashes`
   source files `actor-host.js`'s ed25519 imports need, copied file-for-file
   (not hand-transcribed) with only bare-specifier import paths patched to
@@ -168,7 +225,7 @@ KotobaWasmElement.define('my-actor-host-demo', {
   and `crypto-demo.wasm` (`gen_keypair`/`sign`/`verify` — same fixture
   shape `kototama.tender`'s (JVM) `tender_test.clj` compiles via
   `wasm-tools`).
-- `src-cljs/kotoba/kami_engine_host.cljs` / `src/kami-engine-host.js` — a
+- `src-cljs/kotoba/kami_engine_host.cljk` / `src/kami-engine-host.js` — a
   port of `kotoba-lang/kami-script-runtime-rs` (the Rust/wasmtime WASM host
   for `kotoba-lang/engine`-compiled `.clj` game scripts), **authored in
   ClojureScript and compiled once via `shadow-cljs.edn`'s `:kami-engine-host`
@@ -199,7 +256,7 @@ KotobaWasmElement.define('my-actor-host-demo', {
   (the same fixture `kami-script-runtime-rs/tests/fixtures/` ships) driven
   for 300 ticks via `requestAnimationFrame` (real-browser confirmation
   outstanding — see ADR-2607078000's Consequences).
-- `src-cljs/kotoba/gpu_clear_host.cljs` / `src/gpu-clear-host.js` — ADR-
+- `src-cljs/kotoba/gpu_clear_host.cljk` / `src/gpu-clear-host.js` — ADR-
   2607078000 Track B **Phase 0**: the browser host for the `gpu-clear`
   capability, the first proof that a compiled `.kotoba` guest can drive a
   real WebGPU canvas clear through a genuinely synchronous Wasm
@@ -215,7 +272,7 @@ KotobaWasmElement.define('my-actor-host-demo', {
 - `examples/gpu-clear/` — `demo_gpu_clear.kotoba`/`.wasm` (a `.kotoba`
   guest that calls `gpu_clear` with a packed color) + `index.html`,
   browser-verified against `setupGpuClearHost` end to end.
-- `src-cljs/kotoba/solar_render_host.cljs` / `src/solar-render-host.js` —
+- `src-cljs/kotoba/solar_render_host.cljk` / `src/solar-render-host.js` —
   ADR-2607078000 Track B **Phase 1**: the browser host for
   `gpu-set-position`/`gpu-draw-frame`, rendering `kami-solar-helix-scene`'s
   9 bodies (Sun + 8 planets) as spheres. The guest (compiled from
@@ -574,7 +631,7 @@ now encodes:
 
 **Proof these actually discriminate pass/fail** (not just theoretically):
 both of Addendum 6's real historical bugs were deliberately reintroduced
-against a local worktree, rebuilt via `shadow-cljs release`, and confirmed to
+against a local worktree, rebuilt via `amu compile --target wasm32-browser`, and confirmed to
 fail the corresponding test before being reverted:
 - Swapping the R/B channels in `gpu_clear_host.cljs`'s `clearValue` made
   `verify-render-gpu-clear.mjs` fail with every sampled pixel reading
@@ -598,19 +655,17 @@ without a working WebGPU adapter (e.g. local Linux dev machines) — CI itself
 does not set this, so a WebGPU regression on `macos-latest` fails loudly, not
 silently.
 
-## Scope (honest R0)
+## Scope (honest R2 advanced-partial)
 
-- **`kgraph-*`, `has_capability`, and 7 of 8 `actor:host` imports have a
-  browser host-import port.** `kse`/`auth`/`llm`/`evm`/`btc`/`egress`/
-  `chain` (referenced in the wider kotoba/kototama design docs) have none,
-  and neither does `actor:host`'s `http-post` (see `src/actor-host.js`'s
-  header comment — `fetch` is real network I/O, so a synchronous Wasm host
-  import can't perform it without either JS Promise Integration, which
-  isn't broadly shipped across engines yet, or a SharedArrayBuffer+
-  `Atomics.wait` bridge, which needs COOP/COEP response headers this
-  library's plain-static-file deployment model doesn't assume). A module
-  calling any other `(module "kotoba")` import will fail to instantiate
-  against this library today.
+- **`kgraph-*`, `has_capability`, and actor:host** (14/14 contract imports,
+  with conditional network transports). `http-post`, `http-fetch`,
+  `http-post-headers`, and `llm-infer` are available via inject or the
+  shared SAB+COOP bridge. **`http-post`** is available via (1) `opts.httpPost` inject
+  (Node/tests), (2) SAB+COOP bridge (`createSabHttpPostBridge`, needs
+  `crossOriginIsolated`), (3) JSPI experimental detection only. Without a
+  path, `http_post` is absent from the import object (clear link error).
+  Wider `kse`/`auth`/`evm`/… surfaces are outside the `actor:host`
+  contract and are not ported.
 - **`has-capability.js` re-states a policy at load time, it doesn't
   re-derive one.** The granted-capabilities list you pass to
   `hasCapabilityHostImport` is trusted input from the page author, not
@@ -627,6 +682,39 @@ silently.
   `WebAssembly.instantiateStreaming` runs) and per host-function call —
   but only for the 4 imports it implements. Don't treat a page built on
   this library as a sandboxed multi-tenant host in general.
+- **Resource limits (`maxMemoryPages`/`max-wall-ms`) are real but weaker
+  than `kototama.tender`'s (JVM/Chicory) equivalents, structurally, not
+  just by omission.** `kototama.contract`'s `default-runtime-limits`
+  defines both `:max-memory-pages` (16 pages/1 MiB) and `:max-wall-ms`
+  (5000 ms) as host-adapter-enforced limits; this repo now implements
+  both, but:
+  - `maxMemoryPages` (`actor-host.js`) is enforced REACTIVELY (checked on
+    every gated host-import call, `-1` once over budget) and once
+    PREVENTIVELY at instantiation time (`memoryWithinCap`, used by
+    `kotoba-wasm-worker-host.js` before calling the guest's export) — not
+    continuously during a call, unlike `tender.clj`'s `MemoryLimits`,
+    which caps `memory.grow` itself at the Chicory engine level. A guest
+    that grows past budget in one shot and never calls back into the host
+    is not caught. This isn't an oversight: kotoba-wasm-emitted modules
+    EXPORT their own memory rather than importing a host-provided one, and
+    the standard `WebAssembly.instantiate` JS API gives no hook to cap an
+    exported memory's growth from outside.
+  - `max-wall-ms` (`kotoba-wasm-worker-element.js` only — `maxWallMs`
+    attribute, default 5000) hard-`terminate()`s the guest's dedicated
+    Worker past the deadline — a real, working defense, but wall-clock,
+    not instruction-count, unlike `tender.clj`'s `fuel-listener`. There is
+    no portable way to preempt a running, JIT-compiled WASM call from JS
+    mid-instruction the way Chicory's per-instruction interpreter dispatch
+    can. `KotobaWasmElement` (the non-Worker element) has NO such
+    protection at all and structurally cannot: its guest runs
+    synchronously on the main/DOM thread, where nothing (not even a
+    `setTimeout`) can preempt it — use `KotobaWasmWorkerElement` for
+    anything untrusted or capability-bearing.
+  - A follow-up with true per-instruction fuel (mirroring `fuel-listener`
+    exactly) would require the `kotoba-lang/amu` wasm backend to
+    inject cooperative fuel-check instructions at loop back-edges/call
+    sites — a compiler change, out of this repo's scope, tracked
+    separately from this host-side interim fix.
 - **Not every kotoba-lang repo has `.kotoba` source to point this at.**
   Most `kotoba-*`-named repos in the org (`lint-kotoba`, `kotoba-code`,
   `kotoba-procedure-clj`, ...) are regular `.cljc`/`.clj` Clojure libraries
