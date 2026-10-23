@@ -15,11 +15,13 @@ Guest binaries are produced by [`amu`](https://github.com/kotoba-lang/amu)
 
 ## Shared client runtime candidate
 
-`src/kotoba-client-runtime.js` is the recovered browser-side implementation
-of `kotoba.app.client-runtime.v1`. It has no imports or build step. Its source
-recovery does not qualify an app or an Amu compiler build. See
-[the recovery record and integration blockers](docs/client-runtime-recovery.md)
-before adopting it.
+`src/kotoba-client-runtime.js` is the canonical browser implementation of
+`kotoba.app.client-runtime.v1`. It has no imports or build step. It validates
+bounded endpoints, obtains fresh trusted consent, and verifies pinned artifact
+bytes and signed descriptors. See [the integration contract](docs/client-runtime.md),
+[browser evidence](docs/evidence/client-runtime-browser-20261023.json) and
+[source recovery provenance](docs/client-runtime-recovery.md). Browser fixture
+qualification does not qualify a product, deployment or Amu compiler build.
 
 ## CDCI status
 

@@ -2,7 +2,8 @@ const NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
 const ENTRY = /^[A-Za-z0-9._~!$&'()+,;=@/-]+$/;
 const ORIGIN = /^https:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?$/;
 const RUNTIME_KEYS = ['entry', 'local-state', 'operations', 'profile', 'schema', 'target', 'workers'];
-const OPERATION_KEYS = ['capability', 'consent', 'data-categories', 'endpoint', 'operation', 'redirect-origins', 'service'];
+const OPERATION_REQUIRED_KEYS = ['capability', 'consent', 'data-categories', 'endpoint', 'operation', 'service'];
+const OPERATION_KEYS = [...OPERATION_REQUIRED_KEYS, 'redirect-origins', 'artifact'];
 export const CLIENT_INFERENCE_PROTOCOL = 'kotoba.inference.v1';
 const INFERENCE_REQUEST_KEYS = Object.freeze({
   load: ['approvedOperations', 'history', 'modelId'],
@@ -37,7 +38,8 @@ function validEntry(value) {
 }
 
 function validOrigin(value) {
-  return typeof value === 'string' && ORIGIN.test(value);
+  if (typeof value !== 'string' || !ORIGIN.test(value)) return false;
+  try { return new URL(value).origin === value; } catch { return false; }
 }
 
 const ENDPOINT_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']);
@@ -77,7 +79,9 @@ function validEndpointPath(value) {
 }
 
 function validEndpoint(value) {
-  return (exactKeys(value, ['origin', 'method', 'path'])
+  return (exactKeys(value, ['origin', 'browser-action'])
+      && validOrigin(value.origin) && validName(value['browser-action']))
+    || (exactKeys(value, ['origin', 'method', 'path'])
       && validOrigin(value.origin)
       && typeof value.method === 'string'
       && ENDPOINT_METHODS.has(value.method)
@@ -167,7 +171,8 @@ function endpointRequestMatches(endpoint, payload, endpointOrigin) {
   if (!record(endpoint)) return false;
   if (Array.isArray(endpoint.routes)) {
     const request = endpointRequest(payload, endpointOrigin);
-    if (request === null || request.origin !== endpointOrigin || request.hash !== '') return false;
+    if (request === null || request.origin !== endpointOrigin || request.hash !== ''
+        || !validEndpointPath(request.path)) return false;
     return endpoint.routes.some((route) => route.method === request.method
       && (Object.hasOwn(route, 'path')
         ? endpointPathMatches(route.path, request.path)
@@ -209,7 +214,7 @@ function snapshotPayloadValue(value) {
   return globalThis.structuredClone(value);
 }
 
-function snapshotOperationPayload(payload, operation, endpointOrigin, request) {
+async function snapshotOperationPayload(payload, operation, endpointOrigin, request) {
   if (!record(payload) || !Object.hasOwn(payload, 'input') || typeof Request === 'undefined') {
     throw new Error('client operation request cannot be snapshotted');
   }
@@ -226,11 +231,19 @@ function snapshotOperationPayload(payload, operation, endpointOrigin, request) {
     && ['GET', 'HEAD'].includes(request.method)
     ? 'follow'
     : 'error';
-  const requestSnapshot = new Request(source, {
+  const captured = new Request(source, {
     ...init,
     method: request.method,
     credentials: 'omit',
+    referrerPolicy: 'no-referrer',
     redirect,
+  });
+  // Request.clone() alone does not freeze a caller-owned ReadableStream.
+  // Materialize a bounded body before showing consent; a later stream write
+  // cannot change what the user is being asked to send.
+  const body = captured.body ? await boundedBytes(captured.body, 16777216, 5000) : null;
+  const requestSnapshot = body === null ? captured : new Request(captured, {
+    body, credentials: 'omit', referrerPolicy: 'no-referrer', redirect,
   });
   const requestUrl = new URL(requestSnapshot.url);
   if (requestUrl.origin !== endpointOrigin) {
@@ -249,9 +262,21 @@ function snapshotOperationPayload(payload, operation, endpointOrigin, request) {
   return Object.freeze(snapshot);
 }
 
+/** Pure preflight/snapshot, not an approval or a transport capability. */
+export async function prepareClientOperationRequest(operation, payload) {
+  if (!validEndpoint(operation?.endpoint) || Object.hasOwn(operation.endpoint, 'browser-action')) throw new TypeError('HTTP endpoint declaration required');
+  const pinned = freezeClone(operation), origin = pinned.endpoint.origin;
+  if (origin === globalThis.location?.origin) throw new Error('app-origin API refused');
+  const request = endpointRequest(payload, origin);
+  if (!request || request.hasCredentials || !endpointRequestMatches(pinned.endpoint, payload, origin)) throw new Error('request scope is not declared');
+  const snapshot = await snapshotOperationPayload(payload, pinned, origin, request);
+  if (!endpointRequestMatches(pinned.endpoint, snapshot, origin)) throw new Error('request scope changed while snapshotting');
+  return snapshot;
+}
+
 /** Match an app request against one declared endpoint. */
 export function clientEndpointAllowsRequest(endpoint, input, method = 'GET') {
-  if (!record(endpoint) || !validEndpoint(endpoint)) return false;
+  if (!record(endpoint) || !validEndpoint(endpoint) || Object.hasOwn(endpoint, 'browser-action')) return false;
   const payload = { input, init: { method } };
   const request = endpointRequest(payload, endpoint.origin);
   return request !== null
@@ -346,16 +371,19 @@ export function clientRuntimeProblems(runtime, requestedCapabilities = [], appOr
     const requested = new Set(Array.isArray(requestedCapabilities) ? requestedCapabilities : []);
     const seen = new Set();
     for (const operation of runtime.operations) {
-      const requiredOperationKeys = OPERATION_KEYS.filter((key) => key !== 'redirect-origins');
-      const hasValidOperationKeys = exactKeys(operation, requiredOperationKeys)
-        || exactKeys(operation, OPERATION_KEYS);
+      const hasValidOperationKeys = record(operation)
+        && OPERATION_REQUIRED_KEYS.every((key) => Object.hasOwn(operation, key))
+        && Object.keys(operation).every((key) => OPERATION_KEYS.includes(key));
       if (!hasValidOperationKeys
           || !validName(operation.capability)
           || !validName(operation.service)
           || !validName(operation.operation)
           || !Array.isArray(operation['data-categories'])
+          || operation['data-categories'].length > 32
           || !operation['data-categories'].every(validName)
+          || new Set(operation['data-categories']).size !== operation['data-categories'].length
           || !validEndpoint(operation.endpoint)
+          || (Object.hasOwn(operation, 'artifact') && !validArtifactDeclaration(operation.artifact))
           || (Object.hasOwn(operation, 'redirect-origins')
             && (!Array.isArray(operation['redirect-origins'])
               || operation['redirect-origins'].length > 16
@@ -384,6 +412,13 @@ export function clientRuntimeProblems(runtime, requestedCapabilities = [], appOr
       if ((operation['redirect-origins'] ?? []).length > 0
           && !endpointSupportsDeclaredRedirects(operation.endpoint)) {
         problems.push({ field: 'operations', error: 'redirects-require-read-only-fixed-query', selector });
+      }
+      if (Object.hasOwn(operation.endpoint, 'browser-action')
+          && (Object.hasOwn(operation, 'artifact') || Object.hasOwn(operation, 'redirect-origins'))) {
+        problems.push({ field: 'operations', error: 'browser-operation-has-http-options', selector });
+      }
+      if (Object.hasOwn(operation, 'artifact') && !endpointSupportsDeclaredRedirects(operation.endpoint)) {
+        problems.push({ field: 'operations', error: 'artifact-requires-read-only-fixed-query', selector });
       }
       if (operation.capability === 'net/http-post') {
         problems.push({ field: 'operations', error: 'generic-network-capability', selector });
@@ -514,7 +549,7 @@ const OFFLINE_CONTENT_POLICY = Object.freeze([
   "default-src 'self'",
   "base-uri 'self'",
   "form-action 'self'",
-  "connect-src 'self'",
+  "connect-src 'none'",
   "img-src 'self' data: blob:",
   "media-src 'self' blob:",
   "font-src 'self' data:",
@@ -554,7 +589,7 @@ export function clientRuntimeConnectSrc(runtime, requestedCapabilities = [], add
   if (problems.length) {
     throw new Error(`invalid client runtime descriptor: ${problems.map(({field, error}) => `${field}:${error}`).join(', ')}`);
   }
-  const origins = new Set(["'self'"]);
+  const origins = new Set();
   for (const operation of runtime.operations) {
     origins.add(operation.endpoint.origin);
     for (const redirectOrigin of operation['redirect-origins'] ?? []) origins.add(redirectOrigin);
@@ -564,12 +599,13 @@ export function clientRuntimeConnectSrc(runtime, requestedCapabilities = [], add
       throw new Error('additional connect-src entries must be declared by a client operation');
     }
   }
-  return `connect-src ${[...origins].sort().join(' ')}`;
+  return `connect-src ${origins.size ? [...origins].sort().join(' ') : "'none'"}`;
 }
 
 /**
  * Apply the same exact intersection as kotoba.protocol.install:
- * signed operation declaration ∩ full local approval ∩ host-supported
+ * signed operation declaration intersected with local host eligibility and
+ * host-supported
  * [capability, service, operation] selectors.
  */
 export function effectiveClientOperations(runtime, {
@@ -589,87 +625,238 @@ export function effectiveClientOperations(runtime, {
   ));
 }
 
-/**
- * Build a fail-closed operation broker. Each service/operation must have its
- * own host adapter; the app never supplies an arbitrary URL or fetch options.
- */
-export function createClientOperationBroker({
-  runtime,
-  requestedCapabilities,
-  approvedOperations,
-  hostSupportedOperations,
-  serviceAdapters = {},
-  confirmOperation,
-}) {
-  const operations = effectiveClientOperations(runtime, {
-    requestedCapabilities,
-    approvedOperations,
-    hostSupportedOperations,
-  }).map(freezeClone);
-  const bySelector = new Map(operations.map((operation) => [operationSelector(operation), operation]));
+const consentHosts = new WeakMap();
+const verifiedArtifacts = new WeakSet();
 
+function plainData(value, depth = 0, ancestors = new Set()) {
+  if (depth > 16) return false;
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || ancestors.has(value)) return false;
+  if (!Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.values(descriptors).some((descriptor) => descriptor.get || descriptor.set)) return false;
+  const next = new Set(ancestors); next.add(value);
+  return Object.values(value).every((child) => plainData(child, depth + 1, next));
+}
+
+/** Trusted shell only. Guests must be isolated from this document and handle.
+ * A callback, synthetic DOM event, cached boolean or browser permission cannot
+ * grant consent. One direct trusted click resolves one displayed invocation.
+ * No approval token or approval store is exposed to application code.
+ */
+export function createClientConsentHost({ document: doc = globalThis.document } = {}) {
+  if (doc !== globalThis.document || !doc?.body || typeof doc.createElement !== 'function') {
+    throw new TypeError('consent requires the trusted host document');
+  }
+  const dialog = doc.createElement('dialog');
+  dialog.className = 'kotoba-client-consent';
+  dialog.setAttribute('aria-label', 'External operation approval');
+  const title = doc.createElement('h2'); title.textContent = 'Allow this operation once?';
+  const scope = doc.createElement('pre'); scope.className = 'kotoba-client-consent-scope';
+  const note = doc.createElement('p');
+  note.textContent = 'This choice applies only to the displayed operation. Denying sends no request. Browser permissions do not approve subsequent operations.';
+  const deny = doc.createElement('button'); deny.type = 'button'; deny.textContent = 'Deny';
+  const allow = doc.createElement('button'); allow.type = 'button'; allow.textContent = 'Allow once';
+  dialog.append(title, scope, note, deny, allow); doc.body.append(dialog);
+  let pending = null;
+  let destroyed = false;
+  function finish(approved) {
+    if (!pending) return;
+    const resolve = pending; pending = null;
+    if (dialog.open) dialog.close();
+    resolve(approved);
+  }
+  allow.addEventListener('click', (event) => {
+    if (event.isTrusted === true && event.currentTarget === allow
+        && event instanceof doc.defaultView.MouseEvent && dialog.open) finish(true);
+  });
+  deny.addEventListener('click', () => finish(false));
+  dialog.addEventListener('cancel', (event) => { event.preventDefault(); finish(false); });
+  dialog.addEventListener('close', () => finish(false));
+  const handle = Object.freeze({ destroy() { destroyed = true; finish(false); dialog.remove(); } });
+  consentHosts.set(handle, async (details) => {
+    if (destroyed || pending || !dialog.isConnected) throw new Error('trusted consent UI is unavailable or busy');
+    scope.textContent = [
+      `Service: ${details.service}`, `Operation: ${details.operation}`,
+      `Capability: ${details.capability}`, `Endpoint: ${details.endpointOrigin}`,
+      `Action: ${details.browserAction ?? `${details.endpointMethod} ${details.endpointPath}${details.endpointSearch}`}`,
+      `Data categories: ${details.dataCategories.join(', ') || '(none)'}`,
+      `Delivery redirects: ${details.redirectOrigins.join(', ') || '(none)'}`,
+    ].join('\n');
+    return new Promise((resolve, reject) => {
+      pending = resolve;
+      try { dialog.showModal(); deny.focus(); }
+      catch (error) { pending = null; reject(error); }
+    });
+  });
+  return handle;
+}
+
+function validArtifactDeclaration(value) {
+  return exactKeys(value, ['revision', 'sha256', 'max-bytes'])
+    && typeof value.revision === 'string' && /^[0-9a-f]{40}$/.test(value.revision)
+    && typeof value.sha256 === 'string' && /^[0-9a-f]{64}$/.test(value.sha256)
+    && Number.isSafeInteger(value['max-bytes']) && value['max-bytes'] > 0
+    && value['max-bytes'] <= 536870912;
+}
+
+const hexBytes = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+const decodeHex = (text) => Uint8Array.from(text.match(/../g) ?? [], (byte) => parseInt(byte, 16));
+const sha256 = async (bytes) => hexBytes(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes)));
+
+/** Immutable Blob, pinned revision, independent digest verification. No execute. */
+export async function verifyClientArtifact(bytes, declaration) {
+  if (!validArtifactDeclaration(declaration) || !(bytes instanceof Uint8Array)) throw new TypeError('artifact requires bytes, immutable revision and expected digest');
+  declaration = freezeClone(declaration);
+  const snapshot = new Uint8Array(bytes);
+  if (snapshot.byteLength > declaration['max-bytes']) throw new Error('artifact exceeds declared byte budget');
+  const digest = await sha256(snapshot);
+  if (digest !== declaration.sha256) throw new Error('artifact digest mismatch; execution refused');
+  const result = Object.freeze({ blob: new Blob([snapshot]), sha256: digest, revision: declaration.revision, verified: true });
+  verifiedArtifacts.add(result);
+  return result;
+}
+
+/** Isolated, self-contained HTML app only. The trusted host must first admit
+ * its publisher and descriptor. Host-issued eligibility and adapters never
+ * cross the port. CSP prevents the guest from issuing service requests itself.
+ */
+export async function mountRestrictedClientApp({ artifact, container, broker }) {
+  if (!verifiedArtifacts.has(artifact) || !(container instanceof globalThis.HTMLElement)
+      || typeof broker?.invoke !== 'function') throw new TypeError('verified app artifact and trusted host broker required');
+  const html = await artifact.blob.text();
+  if (html.length > 8388608) throw new Error('app HTML exceeds byte budget');
+  const frame = document.createElement('iframe');
+  frame.title = 'Restricted Kotoba application';
+  frame.sandbox = 'allow-scripts';
+  frame.referrerPolicy = 'no-referrer';
+  frame.srcdoc = '<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; connect-src \'none\'; script-src \'unsafe-inline\' blob: \'wasm-unsafe-eval\'; style-src \'unsafe-inline\'; img-src data: blob:; media-src blob:; worker-src blob:; frame-src \'none\'; object-src \'none\'; form-action \'none\'; base-uri \'none\'">' + html;
+  let closed = false;
+  const channel = new MessageChannel();
+  channel.port1.onmessage = async ({ data }) => {
+    if (closed || !plainData(data) || !exactKeys(data, ['protocol', 'id', 'selector', 'payload'])
+        || data.protocol !== 'kotoba.client.operation.v1' || !validName(data.id)) return;
+    try {
+      const result = await broker.invoke(data.selector, data.payload);
+      if (result instanceof Response) {
+        // Bridge bounded service data, never the host's transport/credentials.
+        const bytes = result.body ? await boundedBytes(result.body, 1048576, 30000) : new Uint8Array();
+        const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        channel.port1.postMessage({ id: data.id, ok: true, status: result.status, content });
+      } else channel.port1.postMessage({ id: data.id, ok: true, result });
+    } catch (error) { channel.port1.postMessage({ id: data.id, ok: false, error: String(error.message).slice(0, 1024) }); }
+  };
+  frame.addEventListener('load', () => {
+    if (!closed) frame.contentWindow.postMessage({ protocol: 'kotoba.client.host.v1' }, '*', [channel.port2]);
+  }, { once: true });
+  container.append(frame);
+  return Object.freeze({ close() { closed = true; channel.port1.close(); frame.remove(); } });
+}
+
+/** Verify exact descriptor bytes against a host-pinned Ed25519 publisher key.
+ * The pinned key/revision/digest are trusted installer inputs, never guest
+ * declarations. The signature is over the exact bytes, without re-encoding.
+ */
+export async function verifySignedClientDescriptor({ bytes, signature, publicKey, pinnedPublicKey, revision, digest, requestedCapabilities = [], appOrigins = globalThis.location?.origin }) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength > 262144
+      || !/^[0-9a-f]{64}$/.test(publicKey) || publicKey !== pinnedPublicKey
+      || !/^[0-9a-f]{128}$/.test(signature)) throw new TypeError('descriptor publisher pin or signature is invalid');
+  const artifact = await verifyClientArtifact(bytes, { revision, sha256: digest, 'max-bytes': 262144 });
+  const snapshot = new Uint8Array(await artifact.blob.arrayBuffer());
+  const key = await globalThis.crypto.subtle.importKey('raw', decodeHex(publicKey), 'Ed25519', false, ['verify']);
+  if (!await globalThis.crypto.subtle.verify('Ed25519', key, decodeHex(signature), snapshot)) throw new Error('descriptor signature mismatch');
+  const runtime = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(snapshot));
+  const problems = clientRuntimeProblems(runtime, requestedCapabilities, appOrigins);
+  if (problems.length) throw new Error(`invalid signed descriptor: ${JSON.stringify(problems)}`);
+  return Object.freeze({ runtime: freezeClone(runtime), revision, digest, publicKey });
+}
+
+async function boundedArtifact(response, declaration) {
+  if (!response.body) throw new Error('artifact response has no readable body');
+  return verifyClientArtifact(await boundedBytes(response.body, declaration['max-bytes'], 120000), declaration);
+}
+
+async function boundedBytes(stream, maxBytes, deadlineMs) {
+  const reader = stream.getReader();
+  const chunks = []; let size = 0;
+  let timer;
+  const deadline = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error('body snapshot deadline exceeded')), deadlineMs); });
+  try {
+    while (true) {
+      const { done, value } = await Promise.race([reader.read(), deadline]);
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) throw new Error('body exceeds declared byte budget');
+      chunks.push(value);
+    }
+  } catch (error) { reader.cancel().catch(() => {}); throw error; }
+  finally { clearTimeout(timer); try { reader.releaseLock(); } catch { /* cancelled pending read */ } }
+  const bytes = new Uint8Array(size); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes;
+}
+
+/** Trusted host owns eligibility/handlers and exposes only bounded invoke to
+ * its isolated guest. HTTP transport is the captured browser fetch, not an
+ * app-supplied adapter. Changing a callback to return true cannot grant access.
+ * The older approvedOperations name is an eligibility ceiling, never consent.
+ */
+export function createClientOperationBroker(options) {
+  const { runtime, requestedCapabilities = [], approvedOperations = [], hostSupportedOperations = [], browserAdapters = {}, consentHost } = options;
+  if (Object.hasOwn(options, 'confirmOperation') || Object.hasOwn(options, 'serviceAdapters')) throw new TypeError('caller-supplied confirmation and HTTP adapters are not authority');
+  const confirm = consentHosts.get(consentHost);
+  if (!confirm) throw new TypeError('a canonical trusted consent host is required');
+  const descriptor = freezeClone(runtime);
+  const problems = clientRuntimeProblems(descriptor, requestedCapabilities);
+  if (problems.length) throw new TypeError(`invalid client runtime descriptor: ${JSON.stringify(problems)}`);
+  const operations = effectiveClientOperations(descriptor, { requestedCapabilities, approvedOperations, hostSupportedOperations });
+  const bySelector = new Map(operations.map((operation) => [operationSelector(operation), operation]));
+  // Capture supported browser handlers before the guest runs. Reassigning the
+  // caller's map during consent cannot change the operation that will execute.
+  const handlers = new Map(operations.filter((op) => Object.hasOwn(op.endpoint, 'browser-action'))
+    .map((op) => [operationSelector(op), serviceAdapter(browserAdapters, op.service, op.operation)]));
+  const fetchRequest = globalThis.fetch.bind(globalThis);
   return Object.freeze({
     operations: Object.freeze(operations),
     async invoke(selector, payload) {
-      const operation = bySelector.get(JSON.stringify([
-        selector?.capability, selector?.service, selector?.operation,
-      ]));
-      if (!operation) throw new Error('client operation is not approved and supported');
-      const adapter = serviceAdapter(serviceAdapters, operation.service, operation.operation);
-      if (typeof adapter !== 'function') throw new Error('client operation adapter is not supported');
-
+      const operation = bySelector.get(JSON.stringify([selector?.capability, selector?.service, selector?.operation]));
+      if (!operation) throw new Error('client operation is not eligible and supported');
       const endpointOrigin = operation.endpoint.origin;
-
-      if (typeof globalThis.location?.origin === 'string'
-          && endpointOrigin === globalThis.location.origin) {
-        throw new Error('service endpoint must be distinct from the app origin');
+      if (endpointOrigin === globalThis.location?.origin) throw new Error('service endpoint must be distinct from the app origin');
+      const browserAction = operation.endpoint['browser-action'];
+      let approvedPayload; let request = null;
+      if (browserAction) {
+        const handler = handlers.get(operationSelector(operation));
+        if (typeof handler !== 'function') throw new Error('browser operation is not host-supported');
+        // Browser API parameters must be bounded, plain JSON data. Functions,
+        // streams, getters and mutable shared/transfer buffers are not a rail.
+        if (!plainData(payload)) throw new TypeError('browser operation requires bounded plain data');
+        const json = canonical(payload);
+        if (typeof json !== 'string' || json.length > 65536) throw new Error('browser operation payload exceeds budget');
+        approvedPayload = freezeClone(JSON.parse(json));
+      } else {
+        request = endpointRequest(payload, endpointOrigin);
+        if (!request || request.hasCredentials || !endpointRequestMatches(operation.endpoint, payload, endpointOrigin)) throw new Error('request does not match declared service method/path/query');
+        approvedPayload = await prepareClientOperationRequest(operation, payload);
+        request = endpointRequest(approvedPayload, endpointOrigin);
+        if (!request || request.hasCredentials || !endpointRequestMatches(operation.endpoint, approvedPayload, endpointOrigin)) throw new Error('request scope changed while snapshotting');
       }
-      const initialRequest = endpointRequest(payload, endpointOrigin);
-      if (initialRequest?.hasCredentials) {
-        throw new Error('service request URL must not include credentials');
-      }
-      if (initialRequest && initialRequest.origin !== endpointOrigin) {
-        throw new Error('client request does not match the approved service origin');
-      }
-      if (!endpointRequestMatches(operation.endpoint, payload, endpointOrigin)) {
-        throw new Error('service request does not match the approved endpoint method and path');
-      }
-      const approvedPayload = snapshotOperationPayload(payload, operation, endpointOrigin, initialRequest);
-      const request = endpointRequest(approvedPayload, endpointOrigin);
-      if (!request || request.hasCredentials
-          || !endpointRequestMatches(operation.endpoint, approvedPayload, endpointOrigin)) {
-        throw new Error('service request changed while its approved scope was being captured');
-      }
-
-      if (operation.consent === 'each-operation') {
-        if (typeof confirmOperation !== 'function') {
-          throw new Error('per-operation confirmation is unavailable');
-        }
-        const approved = await confirmOperation(Object.freeze({
-          capability: operation.capability,
-          service: operation.service,
-          operation: operation.operation,
-          endpointOrigin,
-          endpointMethod: request?.method ?? null,
-          endpointPath: request?.path ?? null,
-          endpointSearch: request?.search ?? '',
-          redirectOrigins: Object.freeze([...(operation['redirect-origins'] ?? [])]),
-          dataCategories: Object.freeze([...operation['data-categories']]),
-        }));
-        if (approved !== true) throw new Error('client operation was not approved');
-      }
-
-      const result = await adapter({ operation, endpointOrigin, payload: approvedPayload });
-      if (typeof Response !== 'undefined' && result instanceof Response) {
-        if (result.type === 'opaqueredirect' || (result.status >= 300 && result.status < 400)) {
-          throw new Error('service response redirect could not be verified');
-        }
-        if (!result.url) throw new Error('service response origin could not be verified');
-        const responseOrigin = new URL(result.url).origin;
-        const allowedOrigins = [endpointOrigin, ...(operation['redirect-origins'] ?? [])];
-        if (!allowedOrigins.some((origin) => redirectOriginAllows(origin, responseOrigin))) {
-          throw new Error('service response redirect origin is not declared');
-        }
+      const allowed = await confirm(Object.freeze({
+        capability: operation.capability, service: operation.service, operation: operation.operation,
+        endpointOrigin, browserAction, endpointMethod: request?.method ?? null,
+        endpointPath: request?.path ?? null, endpointSearch: request?.search ?? '',
+        dataCategories: operation['data-categories'], redirectOrigins: Object.freeze([...(operation['redirect-origins'] ?? [])]),
+      }));
+      if (allowed !== true) throw new Error('client operation was not approved');
+      if (browserAction) return handlers.get(operationSelector(operation))({ operation, payload: approvedPayload });
+      const result = await fetchRequest(approvedPayload.input);
+      if (result.type === 'opaqueredirect' || (result.status >= 300 && result.status < 400) || !result.url) throw new Error('service response redirect could not be verified');
+      const responseOrigin = new URL(result.url).origin;
+      if (![endpointOrigin, ...(operation['redirect-origins'] ?? [])].some((origin) => redirectOriginAllows(origin, responseOrigin))) throw new Error('service response redirect origin is not declared');
+      if (operation.artifact) {
+        if (!result.ok) throw new Error('artifact download failed');
+        return boundedArtifact(result, operation.artifact);
       }
       return result;
     },
