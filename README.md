@@ -13,6 +13,16 @@ kototama's own `web/` imports from here rather than duplicating the code.
 Guest binaries are produced by [`amu`](https://github.com/kotoba-lang/amu)
 (編む), not by this host.
 
+## Shared client runtime candidate
+
+`src/kotoba-client-runtime.js` is the canonical browser implementation of
+`kotoba.app.client-runtime.v1`. It has no imports or build step. It validates
+bounded endpoints, obtains fresh trusted consent, and verifies pinned artifact
+bytes and signed descriptors. See [the integration contract](docs/client-runtime.md),
+[browser evidence](docs/evidence/client-runtime-browser-20261023.json) and
+[source recovery provenance](docs/client-runtime-recovery.md). Browser fixture
+qualification does not qualify a product, deployment or Amu compiler build.
+
 ## CDCI status
 
 The former GitHub Actions workflow used Node 22, npm and NBB/KBB-based
